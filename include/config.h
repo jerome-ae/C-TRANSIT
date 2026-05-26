@@ -31,10 +31,10 @@
 // Note: SIM800L does NOT support TLS natively.
 // For TLS you would need an external SSL co-processor.
 // Use a broker that allows plain MQTT on port 1883, or set up a local bridge.
-#define MQTT_HOST          "c698857529f142c98dd9bf344260ab0a.s1.eu.hivemq.cloud"
-#define MQTT_PORT          1883        // plain TCP — SIM800L limitation
-#define MQTT_USERNAME      "c-transit"
-#define MQTT_PASSWORD      "B4c-Transitcuit4cu@2"
+#define MQTT_HOST      "broker.hivemq.com"
+#define MQTT_PORT      1883
+#define MQTT_USERNAME  ""   // leave blank
+#define MQTT_PASSWORD  ""   // leave blank
 #define MQTT_CLIENT_ID     TERMINAL_ID
 #define MQTT_KEEPALIVE_S   60
 #define MQTT_QOS           1
