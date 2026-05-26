@@ -12,7 +12,7 @@
 #define GSM_TX_PIN        17          // ESP32 TX → SIM800L RX
 #define GSM_RX_PIN        16          // ESP32 RX → SIM800L TX
 #define GSM_BAUD          9600
-#define GSM_APN           "internet"  // ← set to your carrier APN
+#define GSM_APN           "gloflat"  // ← set to your carrier APN
                                       //   MTN Nigeria:    "internet"
                                       //   Airtel Nigeria: "airtelgprs.com"
                                       //   Glo Nigeria:    "gloflat"
