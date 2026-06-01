@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include "../sync/sync.h"   // for NetMode
 
 typedef enum {
     STATE_BOOT=0,
@@ -15,9 +16,14 @@ typedef enum {
     STATE_ERROR=10
 } TerminalState;
 
+// ── Existing API (unchanged) ──────────────────────────────────────────────────
 void          sm_init();
 TerminalState sm_get_state();
 void          sm_transition(TerminalState s);
-const char* sm_state_name(TerminalState s);
-const char* sm_get_driver_uid();
+const char*   sm_state_name(TerminalState s);
+const char*   sm_get_driver_uid();
 void          sm_set_driver_uid(const char* uid);
+
+// ── New ───────────────────────────────────────────────────────────────────────
+void sm_driver_logout();     // '#' in STATE_READY — flush sync, clear session, lock
+void sm_cycle_net_mode();    // 'A' in STATE_READY — cycle AUTO → WIFI → GSM → AUTO
