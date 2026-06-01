@@ -18,3 +18,8 @@ bool sync_is_running();
 // Downlink parser — called by both WiFi and GSM paths
 void sync_process_downlink(const char* payload, unsigned int len);
 
+
+// Network mode — readable/writable by Core 0 (keypad) and Core 1
+NetMode sync_get_net_mode();
+void    sync_set_net_mode(NetMode mode);
+
