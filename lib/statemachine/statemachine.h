@@ -1,6 +1,6 @@
 #pragma once
 #include <Arduino.h>
-
+#include "../../include/config.h"
 
 typedef enum {
     STATE_BOOT=0,
