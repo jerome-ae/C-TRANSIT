@@ -87,7 +87,7 @@ void sm_cycle_net_mode() {
 
     // Show briefly on LCD then return to idle
     display_show_2line("NET MODE:", label);
-    ui_beep_short();
+    ui_feedback_approved();
     vTaskDelay(pdMS_TO_TICKS(1500));
     display_show_idle();
 }
