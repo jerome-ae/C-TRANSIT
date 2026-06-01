@@ -1,6 +1,6 @@
 #pragma once
 #include <Arduino.h>
-#include "../sync/sync.h"   // for NetMode
+
 
 typedef enum {
     STATE_BOOT=0,
