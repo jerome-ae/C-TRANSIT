@@ -27,24 +27,34 @@ static char s_payload[MQTT_PAYLOAD_BUF];
 //  NETWORK MODE  (persisted to /netmode.dat)
 // =============================================================================
 NetMode sync_get_net_mode() {
+    // ── THE FULL FIX: Pre-check existence to prevent the VFS red error ──
+    if (!LittleFS.exists(FILE_NET_MODE)) {
+        return NET_MODE_AUTO;
+    }
+
     File f = LittleFS.open(FILE_NET_MODE, "r");
     if (!f) return NET_MODE_AUTO;
+    
     char buf[4] = {0};
     int  len    = 0;
     while (f.available() && len < 3) { buf[len++] = (char)f.read(); }
     buf[len] = '\0';
     f.close();
+    
     int val = atoi(buf);
     if (val == NET_MODE_WIFI) return NET_MODE_WIFI;
     if (val == NET_MODE_GSM)  return NET_MODE_GSM;
+    
     return NET_MODE_AUTO;
 }
-
+ 
 void sync_set_net_mode(NetMode mode) {
     File f = LittleFS.open(FILE_NET_MODE, "w");
     if (!f) { LOG_ERROR("SYNC", "Cannot write netmode.dat"); return; }
+    
     f.printf("%d\n", (int)mode);
     f.close();
+    
     const char* names[] = {"AUTO", "WIFI-ONLY", "GSM-ONLY"};
     LOG_INFO("SYNC", "Network mode set to: %s", names[(int)mode]);
 }

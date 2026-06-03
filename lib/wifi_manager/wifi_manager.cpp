@@ -88,8 +88,10 @@ void wifi_manager_run_sync_cycle() {
     // Step 1: Connect to MQTT Broker
     if (!mqttClient.connected()) {
         LOG_INFO("WIFI", "Connecting to MQTT Broker...");
+        
+        // ── FIX 1: Added ', false' at the end to disable Clean Session! ──
         if (!mqttClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD, 
-                                MQTT_TOPIC_STATUS, 1, true, MQTT_LWT_OFFLINE)) {
+                                MQTT_TOPIC_STATUS, 1, true, MQTT_LWT_OFFLINE, false)) {
             LOG_ERROR("WIFI", "MQTT Connection failed, rc=%d", mqttClient.state());
             return;
         }
@@ -120,7 +122,9 @@ void wifi_manager_run_sync_cycle() {
 
     // Step 3: Yield to let PubSubClient check for any incoming downlinks
     uint32_t start = millis();
-    while (millis() - start < 3000) {
+    
+    // ── FIX 2: Increased listening window from 3000ms to 10000ms! ──
+    while (millis() - start < 10000) {
         mqttClient.loop(); 
         vTaskDelay(pdMS_TO_TICKS(50));
     }

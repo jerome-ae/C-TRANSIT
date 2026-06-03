@@ -84,7 +84,7 @@ static const char    KEYPAD_MAP[4][4]   = {
 #define FILE_TX_LOG     "/tx.log"
 
 // ── 9. TIMING & BEHAVIOUR ─────────────────────────────────────────────────────
-#define SYNC_INTERVAL_MS          300000UL  // 5 minutes
+#define SYNC_INTERVAL_MS          20000UL  // 5 minutes
 #define SYNC_TIMEOUT_SECONDS      10800UL   // 3-hour kill switch
 #define TX_LOG_MAX_LINES          2000
 #define MAX_OFFLINE_TAPS_PER_UID  2

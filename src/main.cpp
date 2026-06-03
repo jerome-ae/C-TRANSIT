@@ -107,6 +107,9 @@ static bool boot_hardware() {
     Wire.begin(21, 22);
     Wire.setClock(400000);
 
+    // ── THE FIX: Prevent I2C from hanging infinitely during Wi-Fi Sync ──
+    Wire.setTimeOut(20);
+
     bool ok = true;
 
     if (!display_init()) LOG_WARN("MAIN", "LCD init failed — continuing");
