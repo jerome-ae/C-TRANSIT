@@ -86,7 +86,8 @@ bool storage_init() {
 
     const char* needed[] = {
         FILE_WHITELIST, FILE_BLACKLIST, FILE_TX_LOG,
-        FILE_SYNC_TS,   FILE_DRIVERS,   FILE_ADMINS
+        FILE_SYNC_TS,   FILE_DRIVERS,   FILE_ADMINS, 
+        FILE_NET_MODE 
     };
     for (auto p : needed) {
         if (!LittleFS.exists(p)) {
