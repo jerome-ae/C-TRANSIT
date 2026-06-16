@@ -23,9 +23,9 @@ typedef enum {
 } NetMode;
 
 // ── 4. WIFI ───────────────────────────────────────────────────────────────────
-#define WIFI_SSID              "0x1324646"
-#define WIFI_PASS              "tensazangetsu12"
-#define WIFI_CONNECT_TIMEOUT_MS 10000UL
+#define WIFI_SSID              "Infinix SMART 8"
+#define WIFI_PASS              "laplace1"
+#define WIFI_CONNECT_TIMEOUT_MS 20000UL
 
 // ── 5. GSM / SIM800L ──────────────────────────────────────────────────────────
 #define GSM_TX_PIN          17

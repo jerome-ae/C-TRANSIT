@@ -32,3 +32,4 @@ size_t        storage_get_file_size(const char* path);
 int           storage_stream_tx_chunk(char* buf,size_t bufsz,size_t* bytes_read);
 StorageResult storage_atomic_delete_sent(size_t bytes_sent);
 StorageResult storage_ingest_chunk(const char* path,const char* uid_list);
+StorageResult storage_append_registration(const char* uid, uint32_t otp, const char* agent);

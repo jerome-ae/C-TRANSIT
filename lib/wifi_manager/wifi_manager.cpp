@@ -130,4 +130,4 @@ void wifi_manager_run_sync_cycle() {
     }
 
     LOG_INFO("WIFI", "Wi-Fi Sync cycle complete.");
-}
+} 

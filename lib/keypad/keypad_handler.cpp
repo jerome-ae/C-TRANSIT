@@ -18,27 +18,25 @@ void keypad_init(){
     LOG_INFO("KEYPAD","4x4 matrix init");
 }
 
-// ── TEMPORARY SERIAL MONITOR BYPASS (V2) ───────────────────────────────
+// ── REAL HARDWARE KEYPAD HANDLER (WITH DEBUG LOG) ────────────────────
 char keypad_get_key() {
-    if (Serial.available()) {
-        char incoming = Serial.read();
-        
-        // 1. Ignore invisible "Enter" keys
-        if (incoming == '\n' || incoming == '\r') {
-            return '\0'; 
-        }
-
-        // 2. Force it to uppercase (so 'a' becomes 'A')
-        incoming = toupper(incoming);
-
-        // 3. ONLY allow valid keypad characters to pass through
-        if ((incoming >= '0' && incoming <= '9') || 
-            (incoming >= 'A' && incoming <= 'D') || 
-            incoming == '*' || incoming == '#') {
-            
-            return incoming;
-        }
+    // 1. Safety check: Was the keypad actually initialized?
+    if (s_kp == nullptr) {
+        // If this prints, your initialization function is missing!
+        LOG_ERROR("KEYPAD", "CRITICAL: Keypad object is NULL! keypad_init() was not called.");
+        return '\0';
     }
+
+    // 2. Ask the hardware matrix for a key
+    char k = s_kp->getKey();
+    
+    // 3. NO_KEY is the standard library response when nothing is pressed
+    if (k != NO_KEY) {
+        // As soon as a physical button is pressed, it should print here instantly
+        LOG_INFO("KEYPAD", "Hardware Key Pressed: %c", k);
+        return k;
+    }
+    
     return '\0'; 
 }
 

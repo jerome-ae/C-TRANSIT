@@ -499,3 +499,30 @@ StorageResult storage_ingest_chunk(const char* path, const char* uid_list) {
     LOG_INFO("STORAGE", "ingest_chunk: %d UIDs → %s", cnt, path);
     return STORAGE_OK;
 }
+
+
+// =============================================================================
+//  storage_append_registration
+//  Formats and saves an OTP registration to tx.log
+// =============================================================================
+StorageResult storage_append_registration(const char* uid, uint32_t otp, const char* agent) {
+    // 1. Lock the hard drive so the Wi-Fi chip doesn't try to read it while we are writing
+    if (!_lock()) return STORAGE_ERROR;
+    
+    // 2. Safety check: Do we have at least 128 bytes of free space?
+    if (!_has_space(128)) { _unlock(); return STORAGE_FULL; }
+
+    // 3. Open tx.log in "a" (append) mode
+    File f = LittleFS.open(FILE_TX_LOG, "a");
+    if (!f) { _unlock(); return STORAGE_ERROR; }
+
+    // 4. Format the exact string the Node.js backend expects, and add a newline (\n)
+    f.printf("PENDING_LINK:%s,%06lu,%s\n", uid, (unsigned long)otp, agent);
+    
+    // 5. Save, close, and unlock
+    f.close();
+    _unlock();
+    
+    LOG_DEBUG("STORAGE", "Saved OTP payload to tx.log for %s", uid);
+    return STORAGE_OK;
+}

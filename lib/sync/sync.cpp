@@ -185,7 +185,7 @@ static bool _wait_bytes(const uint8_t* needle, size_t nlen, uint32_t tms) {
 static bool _mqtt_connect_packet() {
     static uint8_t pkt[256]; int pos=0;
     uint8_t var[64]; int vpos=0;
-    _mw_str(var,&vpos,"MQTT"); var[vpos++]=0x04; var[vpos++]=0xC6;
+    _mw_str(var,&vpos,"MQTT"); var[vpos++]=0x04; var[vpos++]=0xC4;
     _mw_u16(var,&vpos,MQTT_KEEPALIVE_S);
     uint8_t pay[200]; int ppos=0;
     _mw_str(pay,&ppos,MQTT_CLIENT_ID);

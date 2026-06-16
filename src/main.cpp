@@ -270,7 +270,7 @@ static void handle_offline_locked_tap(const char* uid) {
 
     sm_transition(STATE_DRIVER_LOGIN);
 
-    char pin[5] = {0};
+    char pin[5] = {0}; 
     bool got_pin = keypad_read_pin(pin, 4);
 
     if (!got_pin) {
@@ -378,7 +378,7 @@ static void handle_ready_tap(const char* uid) {
 }
 
 // =============================================================================
-//  handle_register_tap  (unchanged)
+//  handle_register_tap
 // =============================================================================
 static void handle_register_tap(const char* uid) {
     if (storage_uid_in_file(FILE_WHITELIST, uid) == STORAGE_FOUND) {
@@ -395,7 +395,14 @@ static void handle_register_tap(const char* uid) {
 
     display_show_otp(otp);
     ui_feedback_otp();
+    
+    // ── THE FIX IS HERE ──
+    // Save the PENDING_LINK payload to the hard drive BEFORE triggering the sync!
+    storage_append_registration(uid, otp, sm_get_driver_uid());
+    
+    // Now that the file is safely saved, wake up Core 1 to upload it via MQTT
     sync_trigger_now();
+    // ─────────────────────
 
     vTaskDelay(pdMS_TO_TICKS(5000));
 
@@ -412,7 +419,6 @@ static void handle_register_tap(const char* uid) {
     if (key == '1') display_show_2line(" REGISTER MODE", "  Tap New Card");
     else            sm_transition(STATE_OFFLINE_LOCKED);
 }
-
 // =============================================================================
 //  check_lockdown_release  (unchanged)
 // =============================================================================
