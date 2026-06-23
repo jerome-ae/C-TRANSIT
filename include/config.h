@@ -6,7 +6,7 @@
 // ── 1. SYSTEM IDENTITY ────────────────────────────────────────────────────────
 #define TERMINAL_ID       "TERM_01"
 #define FIRMWARE_VERSION  "v4.0-DUAL"
-
+ 
 // ── 2. OTA ────────────────────────────────────────────────────────────────────
 // OTA is triggered by a downlink message: SYS:OTA,http://your-server/firmware.bin
 // The ESP32 downloads and flashes to the App1 partition, then reboots.
@@ -54,17 +54,17 @@ typedef enum {
 #define PUBACK_TIMEOUT_MS  8000UL
 
 // ── 7. HARDWARE PINOUTS ───────────────────────────────────────────────────────
-#define PIN_LED_GREEN  2
-#define PIN_LED_RED    4
-#define PIN_BUZZER     13
+#define PIN_LED_GREEN  15
+#define PIN_LED_RED    12
+#define PIN_BUZZER     2
 #define PIN_RFID_SS    5
-#define PIN_RFID_RST   27
+#define PIN_RFID_RST   0
 #define PIN_RFID_SCK   18
 #define PIN_RFID_MISO  19
 #define PIN_RFID_MOSI  23
 
-static const uint8_t KEYPAD_ROW_PINS[4] = {32, 33, 15, 12};
-static const uint8_t KEYPAD_COL_PINS[4] = {0,  14, 26, 25};
+static const uint8_t KEYPAD_ROW_PINS[4] = {32, 33, 25, 26};
+static const uint8_t KEYPAD_COL_PINS[4] = {27, 14, 13,  4};
 static const char    KEYPAD_MAP[4][4]   = {
     {'1','2','3','A'},
     {'4','5','6','B'},
