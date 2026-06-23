@@ -1,79 +1,49 @@
 #include "rfid.h"
-#include "../logger/logger.h"
-#include <MFRC522.h>
 #include <SPI.h>
+#include <MFRC522.h>
+#include "../logger/logger.h"
+#include "../../include/config.h"
 
-static MFRC522 s_mfrc(PIN_RFID_SS, PIN_RFID_RST);
-static char    s_last_uid[9]  = {0};
-static uint32_t s_last_tap_ms  = 0;
+// Instantiate the reader using the pins from config.h
+static MFRC522 s_mfrc522(PIN_RFID_SS, PIN_RFID_RST);
 
-static void _bytes_to_hex(const MFRC522::Uid& uid, char* out){
-    char* p = out;
-    for(uint8_t i=0; i<uid.size && i<4; i++){ 
-        sprintf(p, "%02X", uid.uidByte[i]); 
-        p += 2; 
-    }
-    *p = '\0';
-}
-
-bool rfid_init(){
-    // Force SPI to use our exact pins to prevent hardware mismatches
+bool rfid_init() {
+    // ── THE FIX: Explicitly boot the SPI bus before init ──
     SPI.begin(PIN_RFID_SCK, PIN_RFID_MISO, PIN_RFID_MOSI, PIN_RFID_SS);
     
-    // Explicitly lock the SPI settings for the MFRC522 to prevent bus corruption
-    SPI.beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
+    s_mfrc522.PCD_Init();
     
-    s_mfrc.PCD_Init();
-    
-    SPI.endTransaction();
-    
-    uint8_t fw = s_mfrc.PCD_ReadRegister(MFRC522::VersionReg);
-    if(fw == 0x00 || fw == 0xFF){ 
-        LOG_ERROR("RFID", "Not found (FW=0x%02X)", fw); 
-        return false; 
+    // Safety check just like the standalone test
+    byte v = s_mfrc522.PCD_ReadRegister(s_mfrc522.VersionReg);
+    if (v == 0x00 || v == 0xFF) {
+        LOG_ERROR("RFID", "Init failed! Version: 0x%02X", v);
+        return false;
     }
     
-    LOG_INFO("RFID", "MFRC522 FW=0x%02X", fw);
+    LOG_INFO("RFID", "Module OK. Version: 0x%02X", v);
     return true;
 }
 
-RFIDResult rfid_poll(char* out_uid){
-    if(!out_uid) return RFID_READ_ERROR;
-    
-    if(!s_mfrc.PICC_IsNewCardPresent()) return RFID_NO_CARD;
-    if(!s_mfrc.PICC_ReadCardSerial()){
-        LOG_WARN("RFID", "Serial read failed");
-        return RFID_READ_ERROR;
+RFIDResult rfid_poll(char* uid_out) {
+    // Check if a card is present and readable
+    if (!s_mfrc522.PICC_IsNewCardPresent() || !s_mfrc522.PICC_ReadCardSerial()) {
+        return RFID_NO_CARD;
     }
     
-    char hex[9]; 
-    _bytes_to_hex(s_mfrc.uid, hex);
-    uint32_t now = millis();
+    // Convert the raw bytes into a clean Hex String for our database
+    uid_out[0] = '\0';
+    char hex_buf[3];
     
-    // DEBOUNCE_DELAY_MS is exactly 8000UL from config.h
-    if(strcmp(hex, s_last_uid) == 0 && (now - s_last_tap_ms) < DEBOUNCE_DELAY_MS){
-        s_mfrc.PICC_HaltA(); 
-        s_mfrc.PCD_StopCrypto1();
-        LOG_DEBUG("RFID", "Debounce %s", hex);
-        return RFID_DUPLICATE;
+    // We only take the first 4 bytes (8 characters) to fit our char[9] buffers safely
+    byte read_size = (s_mfrc522.uid.size < 4) ? s_mfrc522.uid.size : 4;
+    
+    for (byte i = 0; i < read_size; i++) {
+        snprintf(hex_buf, sizeof(hex_buf), "%02X", s_mfrc522.uid.uidByte[i]);
+        strncat(uid_out, hex_buf, 8 - strlen(uid_out));
     }
     
-    strncpy(s_last_uid, hex, sizeof(s_last_uid));
-    s_last_tap_ms = now;
-    strncpy(out_uid, hex, 9);
+    // Command the card to go to sleep so we don't read it 1,000 times a second
+    s_mfrc522.PICC_HaltA();
     
-    s_mfrc.PICC_HaltA(); 
-    s_mfrc.PCD_StopCrypto1();
-    LOG_INFO("RFID", "Card: %s", hex);
     return RFID_NEW_CARD;
-}
-
-void rfid_clear_debounce(){ 
-    memset(s_last_uid, 0, sizeof(s_last_uid)); 
-    s_last_tap_ms = 0; 
-}
-
-bool rfid_self_test(){
-    uint8_t fw = s_mfrc.PCD_ReadRegister(MFRC522::VersionReg);
-    return (fw != 0x00 && fw != 0xFF);
 }
