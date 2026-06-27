@@ -42,7 +42,7 @@ static bool boot_hardware();
 static void handle_offline_locked_tap(const char* uid);
 static void handle_ready_tap(const char* uid);
 static void handle_register_tap(const char* uid);
-static void handle_ready_keypad(char key);      
+static void handle_mode_keypad(char key);      
 static void check_lockdown_release();
 static void run_ui_refresh();
 static void ui_delay(uint32_t ms); // Non-blocking delay for UI holds
@@ -200,10 +200,10 @@ static void rfid_ui_task(void* p) {
             }
         }
 
-        // ── Keypad poll (only meaningful in STATE_READY) ──────────────────────
-        if (sm_get_state() == STATE_READY) {
+        // ── Keypad poll (active in ride mode and registration mode) ─────────
+        if (sm_get_state() == STATE_READY || sm_get_state() == STATE_REGISTER_MODE) {
             char key = keypad_get_key();
-            if (key) handle_ready_keypad(key);
+            if (key) handle_mode_keypad(key);
         }
 
         // ── RFID subsystem watchdog ────────────────────────────────────────
@@ -252,18 +252,18 @@ static void rfid_ui_task(void* p) {
 }
 
 // =============================================================================
-//  handle_ready_keypad
+//  handle_mode_keypad
 // =============================================================================
-static void handle_ready_keypad(char key) {
+static void handle_mode_keypad(char key) {
     switch (key) {
         case '#':
             LOG_INFO("MAIN", "Driver '%s' logout requested via keypad",
                      sm_get_driver_uid());
             sm_driver_logout();
             break;
-
+ 
         case 'A':
-            sm_cycle_net_mode();
+            if (sm_get_state() == STATE_READY) sm_cycle_net_mode();
             break;
 
         default:
@@ -432,6 +432,10 @@ static void handle_register_tap(const char* uid) {
     uint32_t t = millis();
     while ((millis() - t) < 30000) {
         key = keypad_get_key();
+        if (key == '#') {
+            sm_driver_logout();
+            return;
+        }
         if (key == '1' || key == '0') break;
         
         // Keep UI animations alive during wait
