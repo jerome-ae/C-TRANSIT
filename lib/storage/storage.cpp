@@ -55,6 +55,65 @@ static void _extract_uid(const char* line, char* uid_out, size_t uid_sz) {
     uid_out[i] = '\0';
 }
 
+static void _normalize_entry(char* out, size_t out_sz, const char* entry) {
+    if (!out || out_sz == 0) return;
+    out[0] = '\0';
+    if (!entry) return;
+
+    size_t i = 0;
+    while (entry[i] && entry[i] != '\n' && entry[i] != '\r' && i < out_sz - 1) {
+        out[i] = entry[i];
+        i++;
+    }
+    out[i] = '\0';
+}
+
+static StorageResult _upsert_uid_entry(const char* path, const char* entry) {
+    if (!path || !entry) return STORAGE_ERROR;
+
+    char normalized[LINE_BUF];
+    _normalize_entry(normalized, sizeof(normalized), entry);
+    if (normalized[0] == '\0') return STORAGE_ERROR;
+
+    char target_uid[16];
+    _extract_uid(normalized, target_uid, sizeof(target_uid));
+    if (target_uid[0] == '\0') return STORAGE_ERROR;
+
+    File src = LittleFS.open(path, "r");
+    File dst = LittleFS.open(FILE_TEMP, "w");
+    if (!dst) {
+        if (src) src.close();
+        return STORAGE_ERROR;
+    }
+
+    bool found = false;
+    if (src) {
+        char line[LINE_BUF];
+        while (src.available()) {
+            if (_read_line(src, line, sizeof(line)) == 0) continue;
+
+            char line_uid[16];
+            _extract_uid(line, line_uid, sizeof(line_uid));
+            if (strcmp(line_uid, target_uid) == 0) {
+                found = true;
+                dst.printf("%s\n", normalized);
+            } else if (line[0] != '\0') {
+                dst.printf("%s\n", line);
+            }
+        }
+        src.close();
+    }
+
+    if (!found) dst.printf("%s\n", normalized);
+
+    dst.close();
+    LittleFS.remove(path);
+    if (!LittleFS.rename(FILE_TEMP, path)) {
+        return STORAGE_ERROR;
+    }
+    return STORAGE_OK;
+}
+
 // =============================================================================
 //  storage_init
 // =============================================================================
@@ -156,14 +215,12 @@ StorageResult storage_append_uid(const char* path, const char* uid) {
     if (!_lock()) return STORAGE_ERROR;
     if (!_has_space(32)) { _unlock(); return STORAGE_FULL; }
 
-    File f = LittleFS.open(path, "a");
-    if (!f) { _unlock(); return STORAGE_ERROR; }
-
-    f.printf("%s\n", uid);
-    f.close();
+    StorageResult res = _upsert_uid_entry(path, uid);
     _unlock();
-    LOG_DEBUG("STORAGE", "append_uid %s → %s", uid, path);
-    return STORAGE_OK;
+
+    LOG_DEBUG("STORAGE", "append_uid %s → %s (%s)", uid, path,
+              (res == STORAGE_OK) ? "upserted" : "failed");
+    return res;
 }
 
 // =============================================================================
@@ -485,9 +542,6 @@ StorageResult storage_ingest_chunk(const char* path, const char* uid_list) {
     if (!_lock()) return STORAGE_ERROR;
     if (!_has_space(512)) { _unlock(); return STORAGE_FULL; }
 
-    File f = LittleFS.open(path, "a");
-    if (!f) { _unlock(); return STORAGE_ERROR; }
-
     char buf[512];
     strncpy(buf, uid_list, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
@@ -496,11 +550,12 @@ StorageResult storage_ingest_chunk(const char* path, const char* uid_list) {
     char* tok = strtok(buf, "|");
     while (tok) {
         while (*tok == ' ') tok++;
-        if (strlen(tok)) { f.printf("%s\n", tok); cnt++; }
+        if (strlen(tok)) {
+            if (_upsert_uid_entry(path, tok) == STORAGE_OK) cnt++;
+        }
         tok = strtok(nullptr, "|");
     }
 
-    f.close();
     _unlock();
     LOG_INFO("STORAGE", "ingest_chunk: %d UIDs → %s", cnt, path);
     return STORAGE_OK;

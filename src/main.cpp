@@ -34,6 +34,7 @@ static const uint32_t LCD_ANIM_FLASH_MS = 500;
 static const uint32_t OTP_MIN           = 100000;
 static const uint32_t OTP_MAX           = 999999;
 static const uint32_t UI_REFRESH_MS     = 500;
+static const uint32_t RFID_WATCHDOG_MS  = 8000;
 
 // ── Forward declarations ──────────────────────────────────────────────────────
 static void rfid_ui_task(void* p);
@@ -47,6 +48,8 @@ static void run_ui_refresh();
 static void ui_delay(uint32_t ms); // Non-blocking delay for UI holds
 
 static uint32_t s_last_ui_refresh_ms = 0;
+static uint32_t s_last_rfid_watchdog_ms = 0;
+static bool     s_rfid_fault_alerted = false;
 
 // =============================================================================
 //  setup
@@ -56,6 +59,9 @@ void setup() {
     LOG_INFO("MAIN", "=== BOOT === Terminal: %s", TERMINAL_ID);
 
     power_init();
+
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     if (!boot_hardware()) {
         display_show_2line("  BOOT FAILED ", " Check Wiring ");
@@ -83,7 +89,7 @@ void setup() {
 
     // ── Core 0: RFID + UI task ───────────────────────────────────────────────
     xTaskCreatePinnedToCore(rfid_ui_task, "rfid_ui",
-                            STACK_SIZE_APP, nullptr, PRIORITY_APP, // Fixed Macro
+                            STACK_SIZE_APP, nullptr, PRIORITY_APP, 
                             nullptr, CORE_APP);
 
     LOG_INFO("MAIN", "Tasks launched — entering scheduler");
@@ -198,6 +204,20 @@ static void rfid_ui_task(void* p) {
         if (sm_get_state() == STATE_READY) {
             char key = keypad_get_key();
             if (key) handle_ready_keypad(key);
+        }
+
+        // ── RFID subsystem watchdog ────────────────────────────────────────
+        if ((now_ms - s_last_rfid_watchdog_ms) >= RFID_WATCHDOG_MS) {
+            s_last_rfid_watchdog_ms = now_ms;
+            if (!rfid_watchdog_tick()) {
+                if (!s_rfid_fault_alerted) {
+                    display_show_2line(" RFID FAULT   ", " Service Needed");
+                    ui_feedback_rejected();
+                    s_rfid_fault_alerted = true;
+                }
+            } else if (s_rfid_fault_alerted) {
+                s_rfid_fault_alerted = false;
+            }
         }
 
         // ── RFID poll ─────────────────────────────────────────────────────────

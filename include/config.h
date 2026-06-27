@@ -5,7 +5,7 @@
  
 // ── 1. SYSTEM IDENTITY ────────────────────────────────────────────────────────
 #define TERMINAL_ID       "TERM_01"
-#define FIRMWARE_VERSION  "v1.0.0L"
+#define FIRMWARE_VERSION  "v1.0.1L"
  
 // ── 2. OTA ────────────────────────────────────────────────────────────────────
 #define OTA_TIMEOUT_MS    120000UL   // 2 minutes max for firmware download
@@ -60,12 +60,12 @@ typedef enum {
 #define PIN_LED_RED    4
 #define PIN_BUZZER     13  
 #define PIN_RFID_SS    5
-#define PIN_RFID_RST   27 
+#define PIN_RFID_RST   255 
 #define PIN_RFID_SCK   18
 #define PIN_RFID_MISO  19
 #define PIN_RFID_MOSI  23
 
-static const uint8_t KEYPAD_ROW_PINS[4] = {0, 14, 26, 25};
+static const uint8_t KEYPAD_ROW_PINS[4] = {27, 14, 26, 25};
 static const uint8_t KEYPAD_COL_PINS[4] = {32, 33, 15, 12};
 static const char    KEYPAD_MAP[4][4]   = {
     {'1','2','3','A'},
@@ -107,5 +107,5 @@ static const char    KEYPAD_MAP[4][4]   = {
 #define CORE_SYNC          1
 #define PRIORITY_APP       5
 #define PRIORITY_SYNC      3
-#define STACK_SIZE_APP     4096 // 16KB
-#define STACK_SIZE_SYNC    5120 // 20KB
+#define STACK_SIZE_APP     16384 // 16KB
+#define STACK_SIZE_SYNC    20480 // 20KB

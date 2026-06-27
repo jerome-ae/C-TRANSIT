@@ -302,11 +302,53 @@ static void _flush_tx_gsm() {
 //  OTA & DOWNLINK PARSER
 // =============================================================================
 static void _handle_ota(const char* url) {
+    if (!url || !*url) {
+        LOG_ERROR("OTA", "Invalid OTA URL");
+        return;
+    }
+
     LOG_INFO("OTA", "Starting OTA from: %s", url);
-    if (WiFi.status() != WL_CONNECTED) { LOG_ERROR("OTA", "Requires WiFi"); return; }
-    WiFiClient ota_client;
+
+    if (!_heap_ok()) {
+        LOG_ERROR("OTA", "OTA blocked: insufficient heap for secure transfer");
+        return;
+    }
+
+    if (WiFi.status() != WL_CONNECTED) {
+        if (!_wifi_connect()) {
+            LOG_ERROR("OTA", "OTA blocked: Wi-Fi unavailable");
+            return;
+        }
+    }
+
+    // Use a dedicated secure client so TLS is encrypted without the cert-chain
+    // allocation pressure of full CA validation.
+    WiFiClientSecure ota_client;
+    ota_client.setInsecure();
+    ota_client.setTimeout(15000);
+
+    httpUpdate.rebootOnUpdate(false);
+    httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
     t_httpUpdate_return ret = httpUpdate.update(ota_client, url);
-    if (ret == HTTP_UPDATE_OK) ESP.restart();
+
+    if (ret == HTTP_UPDATE_OK) {
+        LOG_INFO("OTA", "Update SUCCESS. Finalizing flash...");
+        ota_client.stop();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        ESP.restart();
+        return;
+    }
+
+    ota_client.stop();
+
+    if (ret == HTTP_UPDATE_NO_UPDATES) {
+        LOG_INFO("OTA", "No firmware update available");
+        return;
+    }
+
+    LOG_ERROR("OTA", "Update FAILED. Code=%d Error=%s",
+              httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
 }
 
 void sync_process_downlink(const char* pay, unsigned int len) {
@@ -370,6 +412,8 @@ void sync_process_downlink(const char* pay, unsigned int len) {
     }
 }
 
+
+
 // =============================================================================
 //  CORE 1 TASK — PERSISTENT TLS LOOP
 // =============================================================================
@@ -423,6 +467,10 @@ void sync_task(void* params) {
                         s_running = true;
                         _flush_tx_wifi();
                         last_sync = millis();
+                        // ── THE VITAL SIGNS MONITOR (WIFI) ──
+                        LOG_INFO("SYS", "WIFI SYNC OK | Free Heap: %d B | Stack Free: %d words", 
+                                 ESP.getFreeHeap(), 
+                                 uxTaskGetStackHighWaterMark(s_task_handle));
                         s_running = false;
                     }
                 } else {
@@ -452,6 +500,11 @@ void sync_task(void* params) {
                     gsm_fails = 0; // Success! Reset the counter.
                     _mqtt_publish_gsm(MQTT_TOPIC_STATUS, (const uint8_t*)MQTT_LWT_ONLINE, strlen(MQTT_LWT_ONLINE), 0, true);
                     _flush_tx_gsm();
+                    
+                    // ── THE VITAL SIGNS MONITOR (GSM) ──
+                    LOG_INFO("SYS", "GSM SYNC OK | Free Heap: %d B | Stack Free: %d words", 
+                             ESP.getFreeHeap(), 
+                             uxTaskGetStackHighWaterMark(s_task_handle));
                 } else {
                     // Failed. Increment counter.
                     gsm_fails++;
