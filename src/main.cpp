@@ -375,7 +375,7 @@ static void handle_ready_tap(const char* uid) {
             ui_feedback_rejected();
             ui_delay(LCD_RESULT_MS);
             sm_transition(STATE_READY);
-            break;
+            break; 
     }
 }
 

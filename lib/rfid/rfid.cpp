@@ -44,6 +44,8 @@ RFIDResult rfid_poll(char* uid_out) {
     
     // Command the card to go to sleep so we don't read it 1,000 times a second
     s_mfrc522.PICC_HaltA();
+
+    s_mfrc522.PCD_StopCrypto1();
     
     return RFID_NEW_CARD;
 }

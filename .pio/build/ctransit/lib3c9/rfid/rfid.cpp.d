@@ -132,9 +132,10 @@
  /home/codespace/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/esp_hw_support/include/soc/esp32/spiram.h \
  /home/codespace/.platformio/packages/framework-arduinoespressif32/cores/esp32/io_pin_remap.h \
  /home/codespace/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
- lib/rfid/../../include/config.h lib/rfid/../logger/logger.h \
+ lib/rfid/../../include/config.h \
+ /home/codespace/.platformio/packages/framework-arduinoespressif32/libraries/SPI/src/SPI.h \
+ /home/codespace/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-spi.h \
  .pio/libdeps/ctransit/MFRC522/src/MFRC522.h \
  .pio/libdeps/ctransit/MFRC522/src/require_cpp11.h \
  .pio/libdeps/ctransit/MFRC522/src/deprecated.h \
- /home/codespace/.platformio/packages/framework-arduinoespressif32/libraries/SPI/src/SPI.h \
- /home/codespace/.platformio/packages/framework-arduinoespressif32/cores/esp32/esp32-hal-spi.h
+ lib/rfid/../logger/logger.h

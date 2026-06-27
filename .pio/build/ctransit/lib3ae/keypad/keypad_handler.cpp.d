@@ -134,5 +134,5 @@
  /home/codespace/.platformio/packages/framework-arduinoespressif32/cores/esp32/Arduino.h \
  lib/keypad/../../include/config.h lib/keypad/../display/display.h \
  lib/keypad/../logger/logger.h lib/keypad/../ui/ui.h \
- .pio/libdeps/ctransit/Keypad/src/Keypad.h \
+ lib/keypad/../power/power.h .pio/libdeps/ctransit/Keypad/src/Keypad.h \
  .pio/libdeps/ctransit/Keypad/src/Key.h

@@ -2,7 +2,7 @@
 // =============================================================================
 // C-TRANSIT TERMINAL — PRODUCTION CONFIGURATION
 // =============================================================================
-
+ 
 // ── 1. SYSTEM IDENTITY ────────────────────────────────────────────────────────
 #define TERMINAL_ID       "TERM_01"
 #define FIRMWARE_VERSION  "v1.0.0L"
@@ -11,12 +11,12 @@
 #define OTA_TIMEOUT_MS    120000UL   // 2 minutes max for firmware download
 
 // ── 3. NETWORK MODE ───────────────────────────────────────────────────────────
-#define FILE_NET_MODE     "/data/netmode.dat"
+#define FILE_NET_MODE     "/netmode.dat"
 typedef enum {
     NET_MODE_AUTO   = 0,  // try WiFi first, fall back to GSM
     NET_MODE_WIFI   = 1,  // WiFi only
     NET_MODE_GSM    = 2   // GSM only
-} NetMode;
+} NetMode; 
 
 // ── 4. WIFI ───────────────────────────────────────────────────────────────────
 #define WIFI_SSID               "Infinix SMART 8"
@@ -34,15 +34,12 @@ typedef enum {
 #define GSM_TCP_TIMEOUT_MS  10000UL
 
 // ── 6. MQTT BROKER & TLS SECURITY ─────────────────────────────────────────────
-#define MQTT_HOST          "broker.hivemq.com"
+#define MQTT_HOST          "c698857529f142c98dd9bf344260ab0a.s1.eu.hivemq.cloud"
 #define MQTT_PORT          8883 // STRICTLY TLS PORT
-// Credentials injected via platformio.ini build_flags, fallbacks here:
-#ifndef MQTT_BROKER_USER
-  #define MQTT_BROKER_USER ""
-#endif
-#ifndef MQTT_BROKER_PASS
-  #define MQTT_BROKER_PASS ""
-#endif
+
+#define MQTT_BROKER_USER   "c-transit" 
+#define MQTT_BROKER_PASS   "B4c-Transitcuit4cu@2"
+
 #define MQTT_CLIENT_ID     TERMINAL_ID
 #define MQTT_KEEPALIVE_S   60
 #define MQTT_QOS           1
@@ -61,14 +58,14 @@ typedef enum {
 // ── 7. HARDWARE PINOUTS (Original Safe Spec) ──────────────────────────────────
 #define PIN_LED_GREEN  2
 #define PIN_LED_RED    4
-#define PIN_BUZZER     0  
+#define PIN_BUZZER     13  
 #define PIN_RFID_SS    5
-#define PIN_RFID_RST   27
+#define PIN_RFID_RST   27 
 #define PIN_RFID_SCK   18
 #define PIN_RFID_MISO  19
 #define PIN_RFID_MOSI  23
 
-static const uint8_t KEYPAD_ROW_PINS[4] = {13, 14, 26, 25};
+static const uint8_t KEYPAD_ROW_PINS[4] = {0, 14, 26, 25};
 static const uint8_t KEYPAD_COL_PINS[4] = {32, 33, 15, 12};
 static const char    KEYPAD_MAP[4][4]   = {
     {'1','2','3','A'},
@@ -83,15 +80,15 @@ static const char    KEYPAD_MAP[4][4]   = {
 
 // ── 8. LITTLEFS FILE PATHS ────────────────────────────────────────────────────
 #define FS_MOUNT_POINT  "/data"
-#define FILE_WHITELIST  "/data/wl.dat"
-#define FILE_BLACKLIST  "/data/bl.dat"
-#define FILE_DRIVERS    "/data/drv.dat"
-#define FILE_ADMINS     "/data/adm.dat"
-#define FILE_TX_LOG     "/data/tx.log"
-#define FILE_SESSION    "/data/sess.dat"
-#define FILE_SYNC       "/data/sync.dat"
-#define FILE_TEMP       "/data/temp.log"
-#define FILE_SYSCFG     "/data/syscfg.dat" // <-- ADDED for Dynamic Fare
+#define FILE_WHITELIST  "/wl.dat"
+#define FILE_BLACKLIST  "/bl.dat"
+#define FILE_DRIVERS    "/drv.dat"
+#define FILE_ADMINS     "/adm.dat"
+#define FILE_TX_LOG     "/tx.log"
+#define FILE_SESSION    "/sess.dat"
+#define FILE_SYNC       "/sync.dat"
+#define FILE_TEMP       "/temp.log"
+#define FILE_SYSCFG     "/syscfg.dat"
 
 // ── 9. TIMING & BEHAVIOUR ─────────────────────────────────────────────────────
 #define SYNC_INTERVAL_MS          300000UL  // 5 minutes

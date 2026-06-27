@@ -136,7 +136,6 @@
  /home/codespace/.platformio/packages/framework-arduinoespressif32/libraries/LittleFS/src/LittleFS.h \
  /home/codespace/.platformio/packages/framework-arduinoespressif32/libraries/FS/src/FS.h \
  lib/sync/../transaction/transaction.h lib/sync/../logger/logger.h \
- lib/sync/../wifi_manager/wifi_manager.h \
  /home/codespace/.platformio/packages/framework-arduinoespressif32/libraries/HTTPUpdate/src/HTTPUpdate.h \
  /home/codespace/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFi.h \
  /home/codespace/.platformio/packages/framework-arduinoespressif32/cores/esp32/Print.h \
@@ -242,4 +241,5 @@
  /home/codespace/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/mbedtls/mbedtls/include/mbedtls/error.h \
  /home/codespace/.platformio/packages/framework-arduinoespressif32/libraries/Update/src/Update.h \
  /home/codespace/.platformio/packages/framework-arduinoespressif32/cores/esp32/MD5Builder.h \
- /home/codespace/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/esp_rom/include/esp_rom_md5.h
+ /home/codespace/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/include/esp_rom/include/esp_rom_md5.h \
+ .pio/libdeps/ctransit/PubSubClient/src/PubSubClient.h

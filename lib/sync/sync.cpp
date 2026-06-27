@@ -130,7 +130,7 @@ static bool _mqtt_connect_wifi() {
     
     LOG_ERROR("WIFI", "MQTT Connect Failed, rc=%d", s_mqtt.state());
     return false;
-}
+} 
 
 static void _flush_tx_wifi() {
     size_t bytes_read = 0;
@@ -330,7 +330,13 @@ void sync_process_downlink(const char* pay, unsigned int len) {
         return;
     }
     
-    if (strncmp(pay, "SYS:SYNC_COMPLETE", 17) == 0) return;
+    // ── THE FIX IS HERE ──────────────────────────────────────────────────────
+    if (strncmp(pay, "SYS:SYNC_COMPLETE", 17) == 0) {
+        LOG_INFO("SYNC", "Backend confirmed sync. Lifting lockdown.");
+        storage_write_sync_ts(transaction_get_ts()); 
+        return;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     if (strncmp(pay, "SYS:", 4) == 0) {
         char tmp[512]; strncpy(tmp, pay, sizeof(tmp) - 1); tmp[sizeof(tmp)-1]='\0';
@@ -386,6 +392,13 @@ void sync_task(void* params) {
     
     uint32_t last_sync = 0;
     
+    // ── THE STATE MACHINE COUNTERS ──
+    enum ActiveNet { USE_WIFI, USE_GSM };
+    ActiveNet current_net = USE_WIFI;
+    
+    uint8_t wifi_fails = 0;
+    uint8_t gsm_fails = 0;
+    
     while (true) {
         uint32_t notif = 0;
         bool triggered = xTaskNotifyWait(0, ULONG_MAX, &notif, pdMS_TO_TICKS(50)) == pdTRUE;
@@ -393,26 +406,68 @@ void sync_task(void* params) {
         
         NetMode mode = sync_get_net_mode();
         
-        if (mode == NET_MODE_AUTO || mode == NET_MODE_WIFI) {
-            if (_mqtt_connect_wifi()) {
-                s_mqtt.loop();
-                if (triggered || time_to_sync) {
-                    s_running = true;
-                    _flush_tx_wifi();
-                    last_sync = millis();
-                    s_running = false;
+        // Override the state machine if the user forced a specific mode via MQTT
+        if (mode == NET_MODE_WIFI) current_net = USE_WIFI;
+        if (mode == NET_MODE_GSM)  current_net = USE_GSM;
+
+        // =========================================================
+        //  STATE 1: TRYING WI-FI
+        // =========================================================
+        if (current_net == USE_WIFI) {
+            // Only spam Wi-Fi if we actually have data to send, or if it's the 60s check
+            if (triggered || time_to_sync || wifi_fails == 0) { 
+                if (_mqtt_connect_wifi()) {
+                    wifi_fails = 0; // Success! Reset the counter.
+                    s_mqtt.loop();
+                    if (triggered || time_to_sync) {
+                        s_running = true;
+                        _flush_tx_wifi();
+                        last_sync = millis();
+                        s_running = false;
+                    }
+                } else {
+                    // Failed. Increment counter.
+                    wifi_fails++;
+                    LOG_WARN("SYNC", "Wi-Fi fail %d/6", wifi_fails);
+                    
+                    if (wifi_fails >= 6 && mode == NET_MODE_AUTO) {
+                        LOG_ERROR("SYNC", "Wi-Fi hit 6 failures. Flipping to GSM!");
+                        current_net = USE_GSM;
+                        gsm_fails = 0; // Reset GSM counter for a fresh start
+                    }
                 }
             }
         } 
-        else if (mode == NET_MODE_GSM && (triggered || time_to_sync)) {
-            s_running = true;
-            if (_gsm_wake() && _gsm_open_gprs() && _gsm_tcp_connect() && _mqtt_connect_packet()) {
-                _mqtt_publish_gsm(MQTT_TOPIC_STATUS,(const uint8_t*)MQTT_LWT_ONLINE, strlen(MQTT_LWT_ONLINE),0,true);
-                _flush_tx_gsm();
+        
+        // =========================================================
+        //  STATE 2: TRYING GSM
+        // =========================================================
+        else if (current_net == USE_GSM) {
+            // GSM uses too much battery to stay connected. Only wake up if we MUST send data.
+            if (triggered || time_to_sync) {
+                LOG_WARN("SYNC", "Waking up SIM800L Module...");
+                s_running = true;
+                
+                if (_gsm_wake() && _gsm_open_gprs() && _gsm_tcp_connect() && _mqtt_connect_packet()) {
+                    gsm_fails = 0; // Success! Reset the counter.
+                    _mqtt_publish_gsm(MQTT_TOPIC_STATUS, (const uint8_t*)MQTT_LWT_ONLINE, strlen(MQTT_LWT_ONLINE), 0, true);
+                    _flush_tx_gsm();
+                } else {
+                    // Failed. Increment counter.
+                    gsm_fails++;
+                    LOG_ERROR("SYNC", "GSM fail %d/3", gsm_fails);
+                    
+                    if (gsm_fails >= 3 && mode == NET_MODE_AUTO) {
+                        LOG_ERROR("SYNC", "GSM hit 3 failures. Flipping back to Wi-Fi!");
+                        current_net = USE_WIFI;
+                        wifi_fails = 0; // Reset Wi-Fi counter for a fresh start
+                    }
+                }
+                
+                _gsm_sleep(); // Always send GSM back to sleep
+                last_sync = millis();
+                s_running = false;
             }
-            _gsm_sleep();
-            last_sync = millis();
-            s_running = false;
         }
     }
 }
