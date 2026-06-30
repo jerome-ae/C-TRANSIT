@@ -5,7 +5,7 @@
  
 // ── 1. SYSTEM IDENTITY ────────────────────────────────────────────────────────
 #define TERMINAL_ID       "TERM_01"
-#define FIRMWARE_VERSION  "v1.0.1L"
+#define FIRMWARE_VERSION  "v1.0.2L"
  
 // ── 2. OTA ────────────────────────────────────────────────────────────────────
 #define OTA_TIMEOUT_MS    120000UL   // 2 minutes max for firmware download
