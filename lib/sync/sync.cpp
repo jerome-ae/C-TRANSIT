@@ -87,6 +87,14 @@ static void _mqtt_callback(char* topic, byte* payload, unsigned int length) {
     sync_process_downlink(s_dl_buf, copy_len);
 }
 
+static void _wifi_got_ip_handler(WiFiEvent_t event, WiFiEventInfo_t info) {
+    (void)info;
+    if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+        LOG_INFO("WIFI", "Got IP, forcing immediate sync");
+        sync_trigger_now();
+    }
+}
+
 static bool _wifi_connect() {
     if (WiFi.status() == WL_CONNECTED) return true;
     
@@ -132,6 +140,61 @@ static bool _mqtt_connect_wifi() {
     return false;
 } 
 
+static bool _wifi_wait_for_puback(uint16_t msgid, uint32_t timeoutMs) {
+    uint32_t start = millis();
+    uint8_t buf[4];
+
+    while ((millis() - start) < timeoutMs) {
+        if (s_wifi_client.available() >= 4) {
+            size_t n = s_wifi_client.readBytes(buf, sizeof(buf));
+            if (n == 4 && (buf[0] & 0xF0) == 0x40 && buf[1] == 0x02) {
+                uint16_t got = ((uint16_t)buf[2] << 8) | (uint16_t)buf[3];
+                if (got == msgid) {
+                    LOG_INFO("WIFI", "PUBACK received for msgid=%u", (unsigned)msgid);
+                    return true;
+                }
+            }
+        }
+        s_mqtt.loop();
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    LOG_ERROR("WIFI", "PUBACK timeout for msgid=%u", (unsigned)msgid);
+    return false;
+}
+
+static bool _wifi_publish_qos1(const char* topic, const char* payload) {
+    if (!topic || !payload) return false;
+
+    static uint16_t s_msgid = 1;
+    uint16_t msgid = s_msgid++;
+    if (s_msgid == 0) s_msgid = 1;
+
+    size_t tlen = strlen(topic);
+    size_t plen = strlen(payload);
+
+    uint8_t pkt[MQTT_PAYLOAD_BUF + 64];
+    int pos = 0;
+
+    pkt[pos++] = 0x32; // PUBLISH, QoS1
+    pos += _mw_rem(pkt + pos, (int)(2 + tlen + 2 + plen));
+
+    _mw_u16(pkt, &pos, tlen);
+    memcpy(pkt + pos, topic, tlen);
+    pos += (int)tlen;
+
+    _mw_u16(pkt, &pos, msgid);
+    memcpy(pkt + pos, payload, plen);
+    pos += (int)plen;
+
+    if (s_wifi_client.write(pkt, (size_t)pos) != (size_t)pos) {
+        LOG_ERROR("WIFI", "Raw publish write failed");
+        return false;
+    }
+
+    return _wifi_wait_for_puback(msgid, PUBACK_TIMEOUT_MS);
+}
+
 static void _flush_tx_wifi() {
     size_t bytes_read = 0;
     int lines = storage_stream_tx_chunk(s_payload, sizeof(s_payload), &bytes_read);
@@ -139,12 +202,12 @@ static void _flush_tx_wifi() {
     if (lines == 0) return;
     
     LOG_INFO("WIFI", "Flushing %d lines", lines);
-    if (s_mqtt.publish(MQTT_TOPIC_TX, s_payload, false)) {
+    if (_wifi_publish_qos1(MQTT_TOPIC_TX, s_payload)) {
         g_last_upload_ms = millis();
         storage_atomic_delete_sent(bytes_read);
         storage_write_sync_ts(transaction_get_ts());
     } else {
-        LOG_ERROR("WIFI", "Publish buffer overflow");
+        LOG_ERROR("WIFI", "Publish failed or no PUBACK received");
     }
 }
 
@@ -422,6 +485,7 @@ void sync_init() {
     vTaskDelay(pdMS_TO_TICKS(1000));
     _at_send("ATE0","OK",2000);
     WiFi.mode(WIFI_STA);
+    WiFi.onEvent(_wifi_got_ip_handler, ARDUINO_EVENT_WIFI_STA_GOT_IP);
 }
 
 void sync_set_task_handle(TaskHandle_t h) { s_task_handle=h; }
@@ -447,6 +511,7 @@ void sync_task(void* params) {
         uint32_t notif = 0;
         bool triggered = xTaskNotifyWait(0, ULONG_MAX, &notif, pdMS_TO_TICKS(50)) == pdTRUE;
         bool time_to_sync = (millis() - last_sync) > SYNC_INTERVAL_MS;
+        bool pending_tx = (storage_get_tx_line_count() > 0);
         
         NetMode mode = sync_get_net_mode();
         
@@ -454,70 +519,58 @@ void sync_task(void* params) {
         if (mode == NET_MODE_WIFI) current_net = USE_WIFI;
         if (mode == NET_MODE_GSM)  current_net = USE_GSM;
 
-        // =========================================================
-        //  STATE 1: TRYING WI-FI
-        // =========================================================
         if (current_net == USE_WIFI) {
-            // Only spam Wi-Fi if we actually have data to send, or if it's the 60s check
-            if (triggered || time_to_sync || wifi_fails == 0) { 
+            if (triggered || time_to_sync || pending_tx || !s_mqtt.connected()) {
                 if (_mqtt_connect_wifi()) {
-                    wifi_fails = 0; // Success! Reset the counter.
+                    wifi_fails = 0;
                     s_mqtt.loop();
-                    if (triggered || time_to_sync) {
-                        s_running = true;
+                    s_running = true;
+                    if (triggered || time_to_sync || pending_tx) {
                         _flush_tx_wifi();
                         last_sync = millis();
-                        // ── THE VITAL SIGNS MONITOR (WIFI) ──
                         LOG_INFO("SYS", "WIFI SYNC OK | Free Heap: %d B | Stack Free: %d words", 
                                  ESP.getFreeHeap(), 
                                  uxTaskGetStackHighWaterMark(s_task_handle));
-                        s_running = false;
                     }
+                    s_mqtt.loop();
+                    s_running = false;
                 } else {
-                    // Failed. Increment counter.
                     wifi_fails++;
                     LOG_WARN("SYNC", "Wi-Fi fail %d/6", wifi_fails);
                     
                     if (wifi_fails >= 6 && mode == NET_MODE_AUTO) {
                         LOG_ERROR("SYNC", "Wi-Fi hit 6 failures. Flipping to GSM!");
                         current_net = USE_GSM;
-                        gsm_fails = 0; // Reset GSM counter for a fresh start
+                        gsm_fails = 0;
                     }
                 }
             }
         } 
         
-        // =========================================================
-        //  STATE 2: TRYING GSM
-        // =========================================================
         else if (current_net == USE_GSM) {
-            // GSM uses too much battery to stay connected. Only wake up if we MUST send data.
-            if (triggered || time_to_sync) {
+            if (triggered || time_to_sync || pending_tx) {
                 LOG_WARN("SYNC", "Waking up SIM800L Module...");
                 s_running = true;
                 
                 if (_gsm_wake() && _gsm_open_gprs() && _gsm_tcp_connect() && _mqtt_connect_packet()) {
-                    gsm_fails = 0; // Success! Reset the counter.
+                    gsm_fails = 0;
                     _mqtt_publish_gsm(MQTT_TOPIC_STATUS, (const uint8_t*)MQTT_LWT_ONLINE, strlen(MQTT_LWT_ONLINE), 0, true);
                     _flush_tx_gsm();
-                    
-                    // ── THE VITAL SIGNS MONITOR (GSM) ──
                     LOG_INFO("SYS", "GSM SYNC OK | Free Heap: %d B | Stack Free: %d words", 
                              ESP.getFreeHeap(), 
                              uxTaskGetStackHighWaterMark(s_task_handle));
                 } else {
-                    // Failed. Increment counter.
                     gsm_fails++;
                     LOG_ERROR("SYNC", "GSM fail %d/3", gsm_fails);
                     
                     if (gsm_fails >= 3 && mode == NET_MODE_AUTO) {
                         LOG_ERROR("SYNC", "GSM hit 3 failures. Flipping back to Wi-Fi!");
                         current_net = USE_WIFI;
-                        wifi_fails = 0; // Reset Wi-Fi counter for a fresh start
+                        wifi_fails = 0;
                     }
                 }
                 
-                _gsm_sleep(); // Always send GSM back to sleep
+                _gsm_sleep();
                 last_sync = millis();
                 s_running = false;
             }
