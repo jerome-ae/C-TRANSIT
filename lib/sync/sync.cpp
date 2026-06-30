@@ -29,6 +29,10 @@ static char s_at_resp[256];
 static char s_dl_buf[512];
 static char s_payload[MQTT_PAYLOAD_BUF];
 
+// Forward declarations for raw MQTT helpers used before their definitions.
+static void _mw_u16(uint8_t* b, int* p, uint16_t v);
+static int  _mw_rem(uint8_t* b, int r);
+
 // =============================================================================
 //  TLS HEAP GUARD (Lever 2)
 // =============================================================================
