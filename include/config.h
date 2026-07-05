@@ -10,7 +10,7 @@
 // Use g_terminal_id everywhere at runtime instead of TERMINAL_ID.
 #define TERMINAL_ID_DEFAULT  "TERM_01"
 #define TERMINAL_ID_MAX_LEN  16         // includes null terminator
-#define FIRMWARE_VERSION     "v1.0.1L"
+#define FIRMWARE_VERSION     "v1.0.5L"
 #define FILE_TERMINAL_ID     "/term_id.dat"
  
 // ── 2. OTA ────────────────────────────────────────────────────────────────────

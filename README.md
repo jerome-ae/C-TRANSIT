@@ -1,232 +1,274 @@
-# C-Transit Terminal Firmware
-**ESP32-WROOM-32E · PlatformIO · Arduino + FreeRTOS · WiFiClientSecure MQTT**
+# C-TRANSIT Terminal Firmware
 
-Production offline-first payment terminal for campus transport.
-Built from System Architecture Document (SAD) Rev 1.0.
+ESP32-based offline-first transit terminal firmware for contactless fare validation, local rule enforcement, and resilient MQTT synchronization.
+
+This build is designed for field deployment with a strict offline-first model: the terminal continues to operate when Wi-Fi or MQTT is unavailable, queues transactions locally in LittleFS, and syncs them later once connectivity returns.
 
 ---
 
-## Hardware (Microscale Invoice #11840)
+## What this firmware does
 
-| Component | GPIO / Interface |
+- Reads RFID/UIDs and validates them against local whitelists, blacklists, and driver/admin databases.
+- Operates fully offline when network is unavailable.
+- Stores transactions and runtime state in LittleFS on the ESP32 flash partition.
+- Uses MQTT over Wi-Fi for uplink transaction delivery, downlink rule updates, OTA triggers, and terminal identity provisioning.
+- Uses a dual-core architecture:
+  - Core 0: UI, RFID, keypad, display, state machine
+  - Core 1: networking, MQTT, sync, OTA, LittleFS access coordination
+
+---
+
+## Hardware overview
+
+| Component | Details |
 |---|---|
-| ESP32-WROOM-32E 38-pin | — |
-| RC522 RFID Kit | VSPI: CS=5, RST=27, SCK=18, MISO=19, MOSI=23 |
-| LCD 1602 + PCF8574 I2C backpack | SDA=21, SCL=22 (addr 0x27) |
-| 4×4 Hard Matrix Keypad | Rows: 13,14,26,25 · Cols: 32,33,15,12 |
-| 5mm Green LED + 220 Ω | GPIO 2 |
-| 5mm Red LED + 220 Ω | GPIO 4 |
-| TMB12A05 Active Buzzer | GPIO 0 |
-| 18650 3200 mAh + Charge Controller | → Rocker Switch → ESP32 Vin |
+| MCU | ESP32-WROOM-32E |
+| RFID | MFRC522 over VSPI |
+| Display | 16x2 LCD via I2C PCF8574 |
+| Keypad | 4x4 matrix keypad |
+| Status LEDs | Green and red LEDs |
+| Audio | Active buzzer |
+| Storage | LittleFS on internal flash |
+| Network | Wi-Fi + MQTT (TLS via WiFiClientSecure) |
+| Power | 5V input, battery-backed system design |
 
-> ⚠️ SD card modules are **NOT used**. Storage is LittleFS on internal flash.
-> ⚠️ SIM800L is replaced by **Wi-Fi** in this build. Power the ESP32 from 5 V.
+### Pin map
 
----
-
-## Project Structure
-
-```
-ctransit-firmware/
-├── platformio.ini          # Build config — platform pinned to espressif32 @ 6.5.0
-├── partitions.csv          # App0 1.5 MB · App1 1.5 MB · LittleFS 960 KB
-├── include/
-│   └── config.h            # Every pin, constant, and tunable in one place
-├── src/
-│   └── main.cpp            # Boot, task creation, state dispatch loop
-├── lib/
-│   ├── logger/             # Tagged serial macros  [RFID] [GSM] [AUTH] …
-│   ├── power/              # WDT arm + brownout detection
-│   ├── storage/            # All LittleFS I/O, free-space guard, atomic swap
-│   ├── display/            # LCD 16×2 via I2C PCF8574
-│   ├── ui/                 # Green/red LEDs + active buzzer
-│   ├── rfid/               # MFRC522 VSPI driver + 8-second debounce
-│   ├── keypad/             # 4×4 matrix scanner, blocking PIN collector
-│   ├── auth/               # 5-step offline validation tree + staff 2FA
-│   ├── transaction/        # RTC from millis offset + tx.log write
-│   ├── sync/               # WiFiClientSecure MQTT, QoS1, LWT, diff sync
-│   └── statemachine/       # 11-state FSM, session persistence
-└── data/                   # Files uploaded to LittleFS via --target uploadfs
-    ├── drv.dat             # DEADBEEF,1234  ← replace before deployment
-    ├── adm.dat             # CAFEBABE,9999  ← replace before deployment
-    ├── wl.dat              # Whitelisted UIDs (one per line)
-    ├── bl.dat              # Blacklisted UIDs (empty at first boot)
-    ├── tx.log              # Transaction queue (empty at first boot)
-    ├── sess.dat            # Session state seed: 0,NONE
-    └── sync.dat            # Sync timestamp seed: 0
-```
+| Function | GPIO |
+|---|---:|
+| RFID CS | 5 |
+| RFID RST | 255 |
+| RFID SCK | 18 |
+| RFID MISO | 19 |
+| RFID MOSI | 23 |
+| LCD SDA | 21 |
+| LCD SCL | 22 |
+| Keypad rows | 27, 14, 26, 25 |
+| Keypad cols | 32, 33, 15, 12 |
+| Green LED | 2 |
+| Red LED | 4 |
+| Buzzer | 13 |
 
 ---
 
-## LittleFS Filesystem Rules
+## Architecture summary
 
-This project enforces the following rules in every file that touches the FS:
+### Core responsibilities
 
-1. **LittleFS only** — SPIFFS is deprecated for frequent read/write on ESP32.
-2. **`partitions.csv`** subtype column = `littlefs` (not `spiffs`).
-3. **Mount call**: `LittleFS.begin(true, "/data", 10, "littlefs")`
-   — the 4th argument must match the **Name** column in `partitions.csv`.
-4. **`platformio.ini`**: `board_build.filesystem = littlefs`
-   — do **not** add `-D ARDUINO_ESP32_LITTLEFS`; that flag is for the old
-   `lorol/LittleFS_esp32` library and conflicts with the built-in.
-5. Transaction writes always use append mode `"a"`.
-   Files are deleted **only** after a confirmed MQTT PUBACK.
-6. Free space is checked before every write (`FS_HEADROOM_BYTES = 8 KB`).
+- [src/main.cpp](src/main.cpp)
+  - Boot sequence
+  - Hardware initialization
+  - Terminal ID load from LittleFS
+  - Task creation for Core 0 and Core 1
+  - State machine coordination
 
-### Mount Error Diagnosis
+- [lib/storage/storage.cpp](lib/storage/storage.cpp)
+  - Mounts LittleFS
+  - Reads and writes terminal identity, sync timestamps, session state, fare config, and transaction queue files
+  - Implements atomic delete of sent transaction bytes from tx.log
+  - Uses a mutex to protect concurrent access from both cores
 
-If `LittleFS.begin()` returns false, check **all three** match:
+- [lib/sync/sync.cpp](lib/sync/sync.cpp)
+  - Connects to Wi-Fi and MQTT
+  - Publishes uplink transaction payloads to the backend
+  - Subscribes to downlink commands and updates
+  - Handles status/LWT online/offline messaging
+  - Triggers sync immediately on Wi-Fi IP acquisition
+  - Uses QoS 1 and PUBACK-gated deletion for reliable delivery
 
-| Where | Must be |
+- [lib/transaction/transaction.cpp](lib/transaction/transaction.cpp)
+  - Records transactions locally with timestamp and fare data
+  - Appends to tx.log for later MQTT delivery
+
+- [lib/statemachine](lib/statemachine)
+  - Maintains offline/online state transitions and lockdown behavior
+
+---
+
+## Storage model (LittleFS)
+
+The firmware uses LittleFS as the persistent storage layer. This is not a temporary cache; it is the operating memory for device state and offline transactions.
+
+### Files used
+
+| File | Purpose |
 |---|---|
-| `partitions.csv` subtype | `littlefs` |
-| `LittleFS.begin()` 4th arg | `"littlefs"` |
-| `platformio.ini` | `board_build.filesystem = littlefs` |
+| /wl.dat | Whitelist entries |
+| /bl.dat | Blacklist entries |
+| /drv.dat | Driver database |
+| /adm.dat | Admin database |
+| /tx.log | Local transaction queue |
+| /sess.dat | Session state |
+| /sync.dat | Last successful sync timestamp |
+| /netmode.dat | Network mode preference |
+| /syscfg.dat | Fare config and other system config |
+| /term_id.dat | Persisted terminal identity |
 
-A mismatch on any one causes a silent mount failure.
+### Important storage rules
 
----
-
-## State Machine
-
-```
-BOOT ──► [sess.dat active?] ──► READY  (power-loss recovery)
-     ──► [wl.dat empty?]   ──► COLD_SYNC
-     ──► [default]         ──► OFFLINE_LOCKED
-
-OFFLINE_LOCKED  ──[driver tap]──► DRIVER_LOGIN ──[PIN ok]──► READY
-OFFLINE_LOCKED  ──[admin tap] ──► DRIVER_LOGIN ──[PIN ok]──► REGISTER_MODE
-
-READY ──[student tap]──► PROCESSING ──[APPROVED]──► APPROVED ──► READY
-                                    ──[DENIED]  ──► DENIED   ──► READY
-READY ──[3-hr timeout]──► HARD_LOCKDOWN ──[sync done]──► READY
-READY ──[tx.log full] ──► HARD_LOCKDOWN
-
-REGISTER_MODE ──[0 or timeout]──► OFFLINE_LOCKED
-COLD_SYNC     ──[SYNC_COMPLETE]──► OFFLINE_LOCKED
-```
+- Files are created on first boot if missing.
+- The terminal ID is loaded from LittleFS before the sync task starts.
+- Transactions are appended to tx.log in a newline-delimited format.
+- Sent data is removed only after the publish path confirms success and the broker acknowledgement path is satisfied.
+- Storage operations are protected by a FreeRTOS mutex to prevent race conditions between Core 0 and Core 1.
 
 ---
 
-## MQTT Topics
+## MQTT and sync behavior
 
-| Topic | Direction | Purpose |
-|---|---|---|
-| `ctransit/TERM_01/tx` | Publish | Transaction payload flush |
-| `ctransit/TERM_01/rx` | Subscribe | Differential whitelist / blacklist updates |
-| `ctransit/TERM_01/status` | LWT | `ONLINE` / `OFFLINE` presence |
+### Topic pattern
 
-Uplink payload format (pipe-delimited, no JSON):
-```
-TERM_01:A1B2C3D4,-200,1708000500,DEADBEEF|E5F6G7H8,-200,1708000545,DEADBEEF
+The firmware builds topics dynamically from the persisted terminal ID:
+
+- Uplink: ctransit/<terminalId>/tx
+- Downlink: ctransit/<terminalId>/rx
+- Status: ctransit/<terminalId>/status
+
+### Connection behavior
+
+- Wi-Fi connection happens first.
+- MQTT connects with a Last Will and Testament (LWT) on the status topic.
+- The firmware publishes ONLINE immediately after a successful connection.
+- The firmware subscribes to the terminal-specific RX topic after connect and after terminal ID changes.
+- The system reuses the same topic namespace even after OTA or identity changes.
+
+### Reliability features
+
+- QoS 1 publish path for important traffic
+- PUBACK-gated deletion so tx.log data is only removed after successful delivery confirmation
+- Immediate sync trigger on Wi-Fi IP acquisition
+- Cooldown logic to avoid sync task thrashing during reconnects
+- Non-retained transaction publishes, retained status/LWT messages
+
+---
+
+## Payload formats
+
+### 1. Uplink transaction payload
+
+Transactions are written to tx.log as newline-delimited records and packed into MQTT publishes as one chunk per sync cycle.
+
+Example logical format:
+
+```text
+<terminalId>:<uid>,<fare>,<timestamp>,<driverUid>
 ```
 
-Downlink differential format:
-```
-ADD:BL,E5F6G7H8|REM:WL,A1B2C3D4
+Example:
+
+```text
+TERM_01:A1B2C3D4,-200,1708000500,DEADBEEF
 ```
 
-Cold-sync chunks:
+The sync layer packages these records into the publish payload, using a line-based builder and fixed-size buffers.
+
+### 2. Downlink differential updates
+
+Downlink messages can update local rule sets or trigger control commands.
+
+Examples:
+
+```text
+ADD:BL,E5F6G7H8
+REM:WL,A1B2C3D4
 ```
-SYS:WL,A1B2C3D4|E5F6G7H8|J9K0L1M2
+
+And system commands:
+
+```text
+SYS:FARE,-250
+SYS:ID,TERM_03
+SYS:NET,1
 SYS:SYNC_COMPLETE
+SYS:OTA,http://example.com/firmware.bin
 ```
 
+### 3. Status message
+
+The firmware publishes status state to:
+
+```text
+ctransit/<terminalId>/status
+```
+
+with values:
+
+- ONLINE
+- OFFLINE
+
 ---
 
-## LCD Animation
+## Offline-first behavior
 
-The UI task runs at 500 ms. It writes two sync indicators into **row 0**:
+The system is intentionally designed to work without network access.
 
-| Column | Symbol | Meaning |
-|---|---|---|
-| 14 | `^` | Upload active (MQTT publish fired within last 400 ms) |
-| 15 | `v` | Download active (MQTT message received within last 400 ms) |
+### Normal flow
 
-Driven by `extern volatile uint32_t g_last_upload_ms` and
-`g_last_download_ms` defined in `sync.cpp`, read in `main.cpp`.
+1. The device boots and loads its terminal ID from LittleFS.
+2. It initializes its local databases from LittleFS files.
+3. It validates taps and records transactions locally.
+4. If Wi-Fi is available, it syncs queued transactions to the broker.
+5. If the network is down, it keeps the transaction queue intact and retries later.
+
+### What survives reboot
+
+- Terminal identity
+- Driver/admin/whitelist/blacklist data
+- Session state
+- Sync timestamps
+- Offline transactions in tx.log
 
 ---
 
-## Build & Flash
+## Build and deployment
 
 ### Prerequisites
+
 ```bash
-pip install platformio          # or install PlatformIO IDE in VS Code
+pip install platformio
 ```
 
-### 1 — Set credentials
-Edit `platformio.ini`:
-```ini
--D WIFI_SSID=\"YourNetworkName\"
--D WIFI_PASS=\"YourPassword\"
+### Build firmware
+
+```bash
+pio run
 ```
 
-Edit `data/drv.dat` with real driver UIDs and PINs:
-```
-AABBCCDD,5678    # UID (8 hex chars), comma, 4-digit PIN
+### Build filesystem image
+
+```bash
+pio run --target buildfs
 ```
 
-### 2 — Flash LittleFS partition (seed files)
+### Upload filesystem data
+
 ```bash
 pio run --target uploadfs
 ```
-> Must be done **before** uploading firmware on a blank device.
-> Also run this any time you edit files in the `data/` folder.
 
-### 3 — Flash firmware
+### Upload firmware
+
 ```bash
 pio run --target upload
 ```
 
-### 4 — Monitor serial output
+### Monitor serial
+
 ```bash
 pio device monitor --baud 115200
 ```
 
-### 5 — Full erase (factory reset)
-```bash
-pio run --target erase
-pio run --target uploadfs
-pio run --target upload
-```
+---
+
+## Production notes
+
+- The firmware is configured for a production debug profile with reduced verbosity.
+- MQTT packet sizes and network buffers are sized for constrained ESP32 memory.
+- The code avoids dynamic String allocation in the Core 1 networking path.
+- The project uses LittleFS with a partition layout that matches the bootloader-compatible partition mapping currently used by the firmware.
 
 ---
 
-## Debug Tags
+## Commit summary for the next change
 
-| Tag | Module |
-|---|---|
-| `[MAIN]` | Boot, task creation, state dispatch |
-| `[RFID]` | Card detection, debounce |
-| `[AUTH]` | Validation tree, staff login |
-| `[TX]` | Transaction recording, RTC |
-| `[STORAGE]` | LittleFS reads/writes, free-space checks |
-| `[SYNC]` | WiFi, MQTT publish/subscribe |
-| `[DISPLAY]` | LCD writes |
-| `[UI]` | LED + buzzer events |
-| `[POWER]` | WDT, brownout, reset reason |
-| `[SM]` | State machine transitions |
-| `[KEYPAD]` | Key presses, PIN entry |
-
-Disable all output for a silent production build:
-```c
-// include/config.h
-#define DEBUG_MODE  0
-```
-
----
-
-## Common Failure Scenarios
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| `LittleFS.begin() failed` | Partition subtype / label mismatch | Check all three: partitions.csv, LittleFS.begin() 4th arg, platformio.ini filesystem |
-| LCD blank after power-on | Contrast pot not adjusted | Turn PCF8574 blue pot until characters appear |
-| LCD address not found | I2C addr is 0x3F, not 0x27 | Run I2C scanner, update `LCD_I2C_ADDR` in config.h |
-| RFID never reads | Wrong SPI pins or bus shared | Verify VSPI: CS=5, RST=27, SCK=18, MISO=19, MOSI=23 |
-| WiFi connect timeout | Wrong SSID/password | Update `WIFI_SSID` / `WIFI_PASS` in platformio.ini build_flags |
-| MQTT connect fails | Wrong broker/port or TLS issue | Verify `MQTT_HOST`, `MQTT_PORT=8883`; `setInsecure()` bypasses cert for dev |
-| Taps rejected after 3 h | 3-hour kill switch (sync.dat) | Confirm WiFi + MQTT syncing and PUBACK writing sync.dat |
-| WDT reset on boot | Hardware init freeze | Read serial backtrace — which module is hung? |
-| Driver PIN never accepted | drv.dat not on device | Run `pio run --target uploadfs` then reflash |
+This update hardens the ESP32 transit terminal firmware for deployment by completing the offline-first sync path, improving MQTT reliability, and making persistence behavior consistent across boot, reconnect, and OTA-safe identity handling. The firmware now loads the terminal ID from LittleFS before the sync task starts, maintains a stable runtime topic namespace for uplink/downlink/status traffic, re-subscribes after reconnects and identity changes, and uses QoS 1 plus PUBACK-gated deletion so transactions are only removed from tx.log after successful broker acknowledgement. Storage is fully LittleFS-backed, payloads are built line-by-line from tx.log without byte-slicing transactions, and the code avoids dynamic String allocations in the network path to stay within the ESP32 memory constraints.

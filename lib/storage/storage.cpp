@@ -124,7 +124,7 @@ bool storage_init() {
     s_mtx = xSemaphoreCreateMutex();
     if (!s_mtx) { LOG_ERROR("STORAGE", "Mutex create failed"); return false; }
 
-    if (!LittleFS.begin(true, FS_MOUNT_POINT, 10, "littlefs")) {
+    if (!LittleFS.begin(true, FS_MOUNT_POINT, 10, "spiffs")) {
         LOG_ERROR("STORAGE", "LittleFS mount failed");
         return false;
     }
@@ -199,6 +199,11 @@ StorageResult storage_read_terminal_id(char* out, size_t sz) {
 
     File f = LittleFS.open(FILE_TERMINAL_ID, "r");
     if (!f) {
+        File w = LittleFS.open(FILE_TERMINAL_ID, "w");
+        if (w) {
+            w.printf("%s\n", TERMINAL_ID_DEFAULT);
+            w.close();
+        }
         _unlock();
         strncpy(out, TERMINAL_ID_DEFAULT, sz - 1);
         out[sz - 1] = '\0';
@@ -208,13 +213,20 @@ StorageResult storage_read_terminal_id(char* out, size_t sz) {
     char line[32];
     int len = _read_line(f, line, sizeof(line));
     f.close();
-    _unlock();
 
     if (len > 0) {
         strncpy(out, line, sz - 1);
         out[sz - 1] = '\0';
+        _unlock();
         return STORAGE_OK;
     }
+
+    File w = LittleFS.open(FILE_TERMINAL_ID, "w");
+    if (w) {
+        w.printf("%s\n", TERMINAL_ID_DEFAULT);
+        w.close();
+    }
+    _unlock();
 
     strncpy(out, TERMINAL_ID_DEFAULT, sz - 1);
     out[sz - 1] = '\0';
@@ -270,6 +282,21 @@ StorageResult storage_append_uid(const char* path, const char* uid) {
     _unlock();
 
     LOG_DEBUG("STORAGE", "append_uid %s → %s (%s)", uid, path,
+              (res == STORAGE_OK) ? "upserted" : "failed");
+    return res;
+}
+
+StorageResult storage_append_uid_with_pin(const char* path, const char* uid, const char* pin) {
+    if (!path || !uid || !pin) return STORAGE_ERROR;
+    if (!_lock()) return STORAGE_ERROR;
+    if (!_has_space(32)) { _unlock(); return STORAGE_FULL; }
+
+    char entry[LINE_BUF];
+    snprintf(entry, sizeof(entry), "%s,%s", uid, pin);
+    StorageResult res = _upsert_uid_entry(path, entry);
+    _unlock();
+
+    LOG_DEBUG("STORAGE", "append_uid_with_pin %s,%s → %s (%s)", uid, pin, path,
               (res == STORAGE_OK) ? "upserted" : "failed");
     return res;
 }

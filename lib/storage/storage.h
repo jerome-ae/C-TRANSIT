@@ -36,6 +36,7 @@ StorageResult storage_get_pin_for_uid(const char* path, const char* uid, char* o
 
 // Appends and removals (Protected by 8KB minimum free space guard)
 StorageResult storage_append_uid(const char* path, const char* uid);
+StorageResult storage_append_uid_with_pin(const char* path, const char* uid, const char* pin);
 StorageResult storage_remove_uid(const char* path, const char* uid);
 StorageResult storage_append_tx(const char* uid, int amt, unsigned long ts, const char* drv);
 StorageResult storage_append_registration(const char* uid, uint32_t otp, const char* agent);

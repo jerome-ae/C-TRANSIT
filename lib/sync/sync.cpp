@@ -26,10 +26,36 @@ static char s_topic_status[48];
 // ── Module state ──────────────────────────────────────────────────────────────
 static TaskHandle_t  s_task_handle = nullptr;
 static volatile bool s_running     = false;
+static volatile uint32_t s_last_trigger_ms = 0;
+static const uint32_t SYNC_TRIGGER_COOLDOWN_MS = 2000UL;
 
 // ── Network Clients ───────────────────────────────────────────────────────────
 static WiFiClientSecure s_wifi_client;
 static PubSubClient     s_mqtt(s_wifi_client);
+static uint16_t         s_pid = 1;
+
+static void _mw_u16(uint8_t* b, int* p, uint16_t v);
+static void _mw_str(uint8_t* b, int* p, const char* s);
+static int  _mw_rem(uint8_t* b, int r);
+static bool _wait_for_puback(uint16_t expected_pid, uint32_t timeoutMs);
+static bool _mqtt_publish_wifi_qos1(const char* topic, const uint8_t* payload, size_t paylen, uint16_t pid, bool retain);
+
+static void _rebuild_topics_from_terminal_id() {
+    snprintf(s_topic_tx,     sizeof(s_topic_tx),     "ctransit/%s/tx",     g_terminal_id);
+    snprintf(s_topic_rx,     sizeof(s_topic_rx),     "ctransit/%s/rx",     g_terminal_id);
+    snprintf(s_topic_status, sizeof(s_topic_status), "ctransit/%s/status", g_terminal_id);
+}
+
+static bool _mqtt_subscribe_rx() {
+    if (!s_mqtt.connected()) return false;
+    bool ok = s_mqtt.subscribe(s_topic_rx, MQTT_QOS);
+    if (ok) {
+        LOG_INFO("WIFI", "Subscribed to %s", s_topic_rx);
+    } else {
+        LOG_ERROR("WIFI", "Subscribe failed for %s", s_topic_rx);
+    }
+    return ok;
+}
 
 // ── Fixed buffers (no String class) ───────────────────────────────────────────
 static char s_at_resp[256];
@@ -94,6 +120,14 @@ static void _mqtt_callback(char* topic, byte* payload, unsigned int length) {
     sync_process_downlink(s_dl_buf, copy_len);
 }
 
+static void _wifi_got_ip_handler(WiFiEvent_t event, WiFiEventInfo_t info) {
+    (void)info;
+    if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+        LOG_INFO("WIFI", "Got IP, triggering immediate sync");
+        sync_trigger_now();
+    }
+}
+
 static bool _wifi_connect() {
     if (WiFi.status() == WL_CONNECTED) return true;
     
@@ -106,7 +140,10 @@ static bool _wifi_connect() {
     }
     
     if (WiFi.status() == WL_CONNECTED) {
-        LOG_INFO("WIFI", "Connected. IP: %s", WiFi.localIP().toString().c_str());
+        IPAddress ip = WiFi.localIP();
+        char ipbuf[16];
+        snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+        LOG_INFO("WIFI", "Connected. IP: %s", ipbuf);
         return true;
     }
     LOG_WARN("WIFI", "Connection timeout");
@@ -124,20 +161,35 @@ static bool _mqtt_connect_wifi() {
     s_mqtt.setServer(MQTT_HOST, MQTT_PORT);
     s_mqtt.setCallback(_mqtt_callback);
     s_mqtt.setBufferSize(MQTT_PAYLOAD_BUF);
+    s_mqtt.setKeepAlive(MQTT_KEEPALIVE_S);
     
     LOG_INFO("WIFI", "TLS Handshake to %s:%d...", MQTT_HOST, MQTT_PORT);
     
-    if (s_mqtt.connect(g_terminal_id, MQTT_BROKER_USER, MQTT_BROKER_PASS, 
-                       s_topic_status, MQTT_QOS, true, MQTT_LWT_OFFLINE)) {
+    if (s_mqtt.connect(g_terminal_id, MQTT_BROKER_USER, MQTT_BROKER_PASS,
+                       s_topic_status, MQTT_QOS, true, MQTT_LWT_OFFLINE, false)) {
         LOG_INFO("WIFI", "MQTT Connected");
-        s_mqtt.publish(s_topic_status, MQTT_LWT_ONLINE, true);
-        s_mqtt.subscribe(s_topic_rx, MQTT_QOS);
+        _mqtt_publish_wifi_qos1(s_topic_status, (const uint8_t*)MQTT_LWT_ONLINE,
+                                strlen(MQTT_LWT_ONLINE), s_pid++, true);
+        _mqtt_subscribe_rx();
         return true;
     }
     
     LOG_ERROR("WIFI", "MQTT Connect Failed, rc=%d", s_mqtt.state());
     return false;
 } 
+
+static bool _commit_acknowledged_delete(size_t bytes_to_delete) {
+    if (bytes_to_delete == 0) return true;
+
+    StorageResult res = storage_atomic_delete_sent(bytes_to_delete);
+    if (res == STORAGE_OK) {
+        storage_write_sync_ts(transaction_get_ts());
+        return true;
+    }
+
+    LOG_ERROR("WIFI", "Delete after PUBACK failed: %d", (int)res);
+    return false;
+}
 
 static void _flush_tx_wifi() {
     size_t bytes_read = 0;
@@ -146,12 +198,12 @@ static void _flush_tx_wifi() {
     if (lines == 0) return;
     
     LOG_INFO("WIFI", "Flushing %d lines", lines);
-    if (s_mqtt.publish(s_topic_tx, s_payload, false)) {
+    if (_mqtt_publish_wifi_qos1(s_topic_tx, (const uint8_t*)s_payload,
+                                strlen(s_payload), s_pid++, false)) {
         g_last_upload_ms = millis();
-        storage_atomic_delete_sent(bytes_read);
-        storage_write_sync_ts(transaction_get_ts());
+        _commit_acknowledged_delete(bytes_read);
     } else {
-        LOG_ERROR("WIFI", "Publish buffer overflow");
+        LOG_ERROR("WIFI", "Publish/ACK failed");
     }
 }
 
@@ -240,6 +292,66 @@ static bool _gsm_tcp_connect() {
 static void _mw_u16(uint8_t* b, int* p, uint16_t v) { b[(*p)++]=(uint8_t)(v>>8); b[(*p)++]=(uint8_t)(v&0xFF); }
 static void _mw_str(uint8_t* b, int* p, const char* s) { uint16_t l=(uint16_t)strlen(s); _mw_u16(b,p,l); memcpy(b+*p,s,l); *p+=l; }
 static int _mw_rem(uint8_t* b, int r) { int p=0; do { uint8_t e=r%128; r/=128; if(r>0)e|=0x80; b[p++]=e; } while(r>0); return p; }
+
+static bool _wait_for_puback(uint16_t expected_pid, uint32_t timeoutMs) {
+    enum { ST_TYPE, ST_REMAINING, ST_PID_MSB, ST_PID_LSB } state = ST_TYPE;
+    uint8_t remaining_len = 0;
+    uint16_t pid = 0;
+    uint32_t start = millis();
+
+    while ((millis() - start) < timeoutMs) {
+        while (s_wifi_client.available()) {
+            uint8_t b = (uint8_t)s_wifi_client.read();
+            switch (state) {
+                case ST_TYPE:
+                    if (b == 0x40) state = ST_REMAINING;
+                    break;
+                case ST_REMAINING:
+                    remaining_len = b;
+                    state = (remaining_len == 2) ? ST_PID_MSB : ST_TYPE;
+                    break;
+                case ST_PID_MSB:
+                    pid = (uint16_t)b << 8;
+                    state = ST_PID_LSB;
+                    break;
+                case ST_PID_LSB:
+                    pid |= b;
+                    if (pid == expected_pid) return true;
+                    state = ST_TYPE;
+                    break;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return false;
+}
+
+static bool _mqtt_publish_wifi_qos1(const char* topic, const uint8_t* payload, size_t paylen, uint16_t pid, bool retain) {
+    if (!topic || !payload || !s_wifi_client.connected()) return false;
+
+    uint8_t pkt[MQTT_PAYLOAD_BUF + 64];
+    int pos = 0;
+    uint8_t flags = 0x32; // PUBLISH, QoS1, retain flag optional
+    if (!retain) flags = 0x32; // QoS1, no retain
+
+    uint8_t var[64];
+    int vpos = 0;
+    _mw_str(var, &vpos, topic);
+    _mw_u16(var, &vpos, pid);
+
+    int rem = vpos + (int)paylen;
+    pkt[pos++] = flags;
+    pos += _mw_rem(pkt + pos, rem);
+    memcpy(pkt + pos, var, vpos);
+    pos += vpos;
+    memcpy(pkt + pos, payload, paylen);
+    pos += (int)paylen;
+
+    size_t wrote = s_wifi_client.write(pkt, (size_t)pos);
+    s_wifi_client.flush();
+    return (wrote == (size_t)pos) && _wait_for_puback(pid, PUBACK_TIMEOUT_MS);
+}
+
 static bool _gsm_cipsend(const uint8_t* data, size_t len) {
     char cmd[32]; snprintf(cmd,sizeof(cmd),"AT+CIPSEND=%zu",len);
     if (!_at_send(cmd,">",GSM_AT_TIMEOUT_MS)) return false;
@@ -300,8 +412,7 @@ static void _flush_tx_gsm() {
     static uint16_t s_pid=1;
     if (_mqtt_publish_gsm(s_topic_tx,(const uint8_t*)s_payload, strlen(s_payload),s_pid++,false)) {
         g_last_upload_ms=millis();
-        storage_atomic_delete_sent(bytes_read);
-        storage_write_sync_ts(transaction_get_ts());
+        _commit_acknowledged_delete(bytes_read);
     }
 }
 
@@ -354,8 +465,7 @@ static void _handle_ota(const char* url) {
         return;
     }
 
-    LOG_ERROR("OTA", "Update FAILED. Code=%d Error=%s",
-              httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+    LOG_ERROR("OTA", "Update FAILED. Code=%d", httpUpdate.getLastError());
 }
 
 void sync_process_downlink(const char* pay, unsigned int len) {
@@ -376,10 +486,11 @@ void sync_process_downlink(const char* pay, unsigned int len) {
         storage_write_terminal_id(new_id);
         strncpy(g_terminal_id, new_id, TERMINAL_ID_MAX_LEN - 1);
         g_terminal_id[TERMINAL_ID_MAX_LEN - 1] = '\0';
-        // Rebuild topics so next MQTT reconnect uses the new identity
-        snprintf(s_topic_tx,     sizeof(s_topic_tx),     "ctransit/%s/tx",     g_terminal_id);
-        snprintf(s_topic_rx,     sizeof(s_topic_rx),     "ctransit/%s/rx",     g_terminal_id);
-        snprintf(s_topic_status, sizeof(s_topic_status), "ctransit/%s/status", g_terminal_id);
+        // Rebuild topics so the next MQTT reconnect uses the new identity
+        _rebuild_topics_from_terminal_id();
+        if (s_mqtt.connected()) {
+            _mqtt_subscribe_rx();
+        }
         LOG_INFO("SYNC", "Terminal ID updated to: %s — topics rebuilt", g_terminal_id);
         return;
     }
@@ -419,16 +530,23 @@ void sync_process_downlink(const char* pay, unsigned int len) {
     char buf[512]; strncpy(buf, pay, sizeof(buf)-1); buf[sizeof(buf)-1]='\0';
     char* cmd = strtok(buf, "|");
     while (cmd) {
-        char act[4]={0}, lst[3]={0}, uid[9]={0};
-        if (sscanf(cmd, "%3[^:]:%2[^,],%8s", act, lst, uid) >= 3) {
+        char act[4]={0}, lst[3]={0}, uid[16]={0}, pin[9]={0};
+        if (sscanf(cmd, "%3[^:]:%2[^,],%15[^,],%8s", act, lst, uid, pin) >= 3) {
             const char* fp=nullptr;
             if      (strcmp(lst,"WL")==0) fp=FILE_WHITELIST;
             else if (strcmp(lst,"BL")==0) fp=FILE_BLACKLIST;
             else if (strcmp(lst,"DR")==0) fp=FILE_DRIVERS;
             else if (strcmp(lst,"AD")==0) fp=FILE_ADMINS;
             if (fp) {
-                if      (strcmp(act,"ADD")==0) storage_append_uid(fp,uid);
-                else if (strcmp(act,"REM")==0) storage_remove_uid(fp,uid);
+                if (strcmp(act,"ADD")==0) {
+                    if ((strcmp(lst,"DR")==0 || strcmp(lst,"AD")==0) && pin[0] != '\0') {
+                        storage_append_uid_with_pin(fp, uid, pin);
+                    } else {
+                        storage_append_uid(fp, uid);
+                    }
+                } else if (strcmp(act,"REM")==0) {
+                    storage_remove_uid(fp, uid);
+                }
             }
         }
         cmd=strtok(nullptr,"|");
@@ -445,20 +563,28 @@ void sync_init() {
     vTaskDelay(pdMS_TO_TICKS(1000));
     _at_send("ATE0","OK",2000);
     WiFi.mode(WIFI_STA);
+    WiFi.onEvent(_wifi_got_ip_handler, ARDUINO_EVENT_WIFI_STA_GOT_IP);
 
     // Build MQTT topic strings at runtime from g_terminal_id.
     // g_terminal_id is loaded from LittleFS before this task starts,
     // so these topics will always reflect the persisted identity — even after OTA.
-    snprintf(s_topic_tx,     sizeof(s_topic_tx),     "ctransit/%s/tx",     g_terminal_id);
-    snprintf(s_topic_rx,     sizeof(s_topic_rx),     "ctransit/%s/rx",     g_terminal_id);
-    snprintf(s_topic_status, sizeof(s_topic_status), "ctransit/%s/status", g_terminal_id);
+    _rebuild_topics_from_terminal_id();
     LOG_INFO("SYNC", "Topics bound to terminal: %s", g_terminal_id);
 }
 
 void sync_set_task_handle(TaskHandle_t h) { s_task_handle=h; }
 bool sync_is_running()                    { return s_running;  }
 void sync_trigger_now() {
-    if (s_task_handle) xTaskNotify(s_task_handle,1,eSetValueWithOverwrite);
+    if (!s_task_handle) return;
+
+    uint32_t now = millis();
+    if ((now - s_last_trigger_ms) < SYNC_TRIGGER_COOLDOWN_MS) {
+        LOG_DEBUG("SYNC", "Sync trigger suppressed by cooldown");
+        return;
+    }
+
+    s_last_trigger_ms = now;
+    xTaskNotify(s_task_handle, 1, eSetValueWithOverwrite);
 }
 
 void sync_task(void* params) {
