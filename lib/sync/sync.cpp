@@ -16,9 +16,9 @@
 volatile uint32_t g_last_upload_ms   = 0;
 volatile uint32_t g_last_download_ms = 0;
 
-// ── Runtime MQTT topic buffers (built from g_terminal_id in sync_init) ────────
+// ── Runtime MQTT topic buffers (built from g_device_id in sync_init) ────────
 // These replace the compile-time MQTT_TOPIC_* macros from config.h.
-extern char g_terminal_id[];
+extern char g_device_id[];  // derived from factory MAC in main.cpp — read-only after boot
 static char s_topic_tx[48];
 static char s_topic_rx[48];
 static char s_topic_status[48];
@@ -40,10 +40,12 @@ static int  _mw_rem(uint8_t* b, int r);
 static bool _wait_for_puback(uint16_t expected_pid, uint32_t timeoutMs);
 static bool _mqtt_publish_wifi_qos1(const char* topic, const uint8_t* payload, size_t paylen, uint16_t pid, bool retain);
 
-static void _rebuild_topics_from_terminal_id() {
-    snprintf(s_topic_tx,     sizeof(s_topic_tx),     "ctransit/%s/tx",     g_terminal_id);
-    snprintf(s_topic_rx,     sizeof(s_topic_rx),     "ctransit/%s/rx",     g_terminal_id);
-    snprintf(s_topic_status, sizeof(s_topic_status), "ctransit/%s/status", g_terminal_id);
+static void _rebuild_topics_from_device_id() {
+    // g_device_id is set once at boot from factory MAC and never changes.
+    // No data race possible — read-only after setup() completes.
+    snprintf(s_topic_tx,     sizeof(s_topic_tx),     "ctransit/%s/tx",     g_device_id);
+    snprintf(s_topic_rx,     sizeof(s_topic_rx),     "ctransit/%s/rx",     g_device_id);
+    snprintf(s_topic_status, sizeof(s_topic_status), "ctransit/%s/status", g_device_id);
 }
 
 static bool _mqtt_subscribe_rx() {
@@ -165,11 +167,12 @@ static bool _mqtt_connect_wifi() {
     
     LOG_INFO("WIFI", "TLS Handshake to %s:%d...", MQTT_HOST, MQTT_PORT);
     
-    if (s_mqtt.connect(g_terminal_id, MQTT_BROKER_USER, MQTT_BROKER_PASS,
+    if (s_mqtt.connect(g_device_id, MQTT_BROKER_USER, MQTT_BROKER_PASS,
                        s_topic_status, MQTT_QOS, true, MQTT_LWT_OFFLINE, false)) {
         LOG_INFO("WIFI", "MQTT Connected");
-        _mqtt_publish_wifi_qos1(s_topic_status, (const uint8_t*)MQTT_LWT_ONLINE,
-                                strlen(MQTT_LWT_ONLINE), s_pid++, true);
+        bool online_ok = _mqtt_publish_wifi_qos1(s_topic_status, (const uint8_t*)MQTT_LWT_ONLINE,
+                                                  strlen(MQTT_LWT_ONLINE), s_pid++, true);
+        LOG_INFO("WIFI", "ONLINE publish %s", online_ok ? "ACKed" : "FAILED");
         _mqtt_subscribe_rx();
         return true;
     }
@@ -375,10 +378,10 @@ static bool _wait_bytes(const uint8_t* needle, size_t nlen, uint32_t tms) {
 
 static bool _mqtt_connect_packet() {
     static uint8_t pkt[256]; int pos=0; uint8_t var[64]; int vpos=0;
-    _mw_str(var,&vpos,"MQTT"); var[vpos++]=0x04; var[vpos++]=0xC4;
+    _mw_str(var,&vpos,"MQTT"); var[vpos++]=0x04; var[vpos++]=0xC2;
     _mw_u16(var,&vpos,MQTT_KEEPALIVE_S);
     uint8_t pay[200]; int ppos=0;
-    _mw_str(pay,&ppos,g_terminal_id);
+    _mw_str(pay,&ppos,g_device_id);
     _mw_str(pay,&ppos,s_topic_status); _mw_str(pay,&ppos,MQTT_LWT_OFFLINE);
     _mw_str(pay,&ppos,MQTT_BROKER_USER); _mw_str(pay,&ppos,MQTT_BROKER_PASS);
     int rem=vpos+ppos; pkt[pos++]=0x10; pos+=_mw_rem(pkt+pos,rem);
@@ -478,22 +481,7 @@ void sync_process_downlink(const char* pay, unsigned int len) {
         return;
     }
 
-    // ── Remote Terminal ID Provisioning: SYS:ID,TERM_03 ─────────────────────
-    // Allows the backend to assign or rename a terminal's identity over MQTT.
-    // Writes to LittleFS and rebuilds topic strings immediately — no reboot needed.
-    if (strncmp(pay, "SYS:ID,", 7) == 0) {
-        const char* new_id = pay + 7;
-        storage_write_terminal_id(new_id);
-        strncpy(g_terminal_id, new_id, TERMINAL_ID_MAX_LEN - 1);
-        g_terminal_id[TERMINAL_ID_MAX_LEN - 1] = '\0';
-        // Rebuild topics so the next MQTT reconnect uses the new identity
-        _rebuild_topics_from_terminal_id();
-        if (s_mqtt.connected()) {
-            _mqtt_subscribe_rx();
-        }
-        LOG_INFO("SYNC", "Terminal ID updated to: %s — topics rebuilt", g_terminal_id);
-        return;
-    }
+    
 
     if (strncmp(pay, "SYS:OTA,", 8) == 0) {
         char url[256]; strncpy(url, pay + 8, sizeof(url) - 1); url[sizeof(url) - 1] = '\0';
@@ -565,11 +553,11 @@ void sync_init() {
     WiFi.mode(WIFI_STA);
     WiFi.onEvent(_wifi_got_ip_handler, ARDUINO_EVENT_WIFI_STA_GOT_IP);
 
-    // Build MQTT topic strings at runtime from g_terminal_id.
-    // g_terminal_id is loaded from LittleFS before this task starts,
-    // so these topics will always reflect the persisted identity — even after OTA.
-    _rebuild_topics_from_terminal_id();
-    LOG_INFO("SYNC", "Topics bound to terminal: %s", g_terminal_id);
+    // Build MQTT topic strings at runtime from g_device_id.
+    // g_device_id is derived from factory MAC in main.cpp setup()
+    // before this task starts — identity survives OTA, no file needed.
+    _rebuild_topics_from_device_id();
+    LOG_INFO("SYNC", "Topics bound to device: %s", g_device_id);
 }
 
 void sync_set_task_handle(TaskHandle_t h) { s_task_handle=h; }
@@ -655,7 +643,8 @@ void sync_task(void* params) {
                 
                 if (_gsm_wake() && _gsm_open_gprs() && _gsm_tcp_connect() && _mqtt_connect_packet()) {
                     gsm_fails = 0; // Success! Reset the counter.
-                    _mqtt_publish_gsm(s_topic_status, (const uint8_t*)MQTT_LWT_ONLINE, strlen(MQTT_LWT_ONLINE), 0, true);
+                    bool online_ok = _mqtt_publish_gsm(s_topic_status, (const uint8_t*)MQTT_LWT_ONLINE, strlen(MQTT_LWT_ONLINE), 0, true);
+                    LOG_INFO("GSM", "ONLINE publish %s", online_ok ? "ACKed" : "FAILED");
                     _flush_tx_gsm();
                     
                     // ── THE VITAL SIGNS MONITOR (GSM) ──

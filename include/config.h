@@ -4,14 +4,12 @@
 // =============================================================================
  
 // ── 1. SYSTEM IDENTITY ────────────────────────────────────────────────────────
-// TERMINAL_ID is no longer a compile-time constant.
-// It is loaded at boot from LittleFS (/term_id.dat) into g_terminal_id[].
-// This ensures the identity survives OTA firmware updates.
-// Use g_terminal_id everywhere at runtime instead of TERMINAL_ID.
-#define TERMINAL_ID_DEFAULT  "TERM_01"
-#define TERMINAL_ID_MAX_LEN  16         // includes null terminator
-#define FIRMWARE_VERSION     "v1.0.5L"
-#define FILE_TERMINAL_ID     "/term_id.dat"
+// Terminal identity is derived from the ESP32 factory MAC address (silicon).
+// Last 3 bytes → 6-char hex string (e.g., "A1B2C3"). Immutable, survives OTA.
+// g_device_id[] is populated in main.cpp setup() before any task starts.
+#define DEVICE_ID_LEN       7          // "A1B2C3" + null         // includes null terminator
+#define FIRMWARE_VERSION     "v1.0.55L"
+
  
 // ── 2. OTA ────────────────────────────────────────────────────────────────────
 #define OTA_TIMEOUT_MS    120000UL   // 2 minutes max for firmware download
@@ -46,8 +44,8 @@ typedef enum {
 #define MQTT_BROKER_USER   "c-transit" 
 #define MQTT_BROKER_PASS   "B4c-Transitcuit4cu@2"
 
-#define MQTT_CLIENT_ID     g_terminal_id  // runtime global — loaded from /term_id.dat
-// MQTT topics built at runtime in sync_init() from g_terminal_id — see sync.cpp
+#define MQTT_CLIENT_ID     g_device_id  // runtime global — derived from factory MAC address
+// MQTT topics built at runtime in sync_init() from g_device_id — see sync.cpp
 #define MQTT_KEEPALIVE_S   60
 #define MQTT_QOS           1
 #define MQTT_LWT_OFFLINE   "OFFLINE"

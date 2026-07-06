@@ -29,9 +29,10 @@
 #include "sync.h"
 #include "statemachine.h"
 
-// ── Terminal Identity (OTA-safe — loaded from LittleFS at boot) ──────────────
+// ── Terminal Identity (from factory MAC — OTA-safe, no file needed) ──────────
 // Declared here, extern'd wherever needed (storage.cpp, sync.cpp).
-char g_terminal_id[TERMINAL_ID_MAX_LEN] = TERMINAL_ID_DEFAULT;
+// Populated in setup() from esp_efuse_mac_get_default() — read-only thereafter.
+char g_device_id[DEVICE_ID_LEN] = {0};;
 
 // ── Local Constants ───────────────────────────────────────────────────────────
 static const uint32_t LCD_ANIM_FLASH_MS = 500;
@@ -71,11 +72,17 @@ void setup() {
         while (true) { power_feed_watchdog(); vTaskDelay(pdMS_TO_TICKS(5000)); }
     }
 
-    // Load terminal ID from LittleFS — must happen before sync_task starts
-    // so MQTT topics are correct from the very first connection attempt.
-    storage_read_terminal_id(g_terminal_id, sizeof(g_terminal_id));
-    LOG_INFO("MAIN", "=== BOOT === Terminal: %s  FW: %s", g_terminal_id, FIRMWARE_VERSION);
-
+        // Derive device identity from factory MAC address (eFuse BLK0).
+    // Deterministic, unique per ESP32, immune to filesystem corruption.
+    // Must happen before sync_task starts so MQTT topics are correct.
+    {
+        uint8_t mac[6];
+        esp_efuse_mac_get_default(mac);
+        snprintf(g_device_id, sizeof(g_device_id), "%02X%02X%02X",
+                 mac[3], mac[4], mac[5]);
+    }
+    LOG_INFO("MAIN", "=== BOOT === Device: %s  FW: %s", g_device_id, FIRMWARE_VERSION);
+    
     // State machine reads sess.dat — determines OFFLINE_LOCKED or READY
     sm_init();
 

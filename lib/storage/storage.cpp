@@ -9,8 +9,7 @@
 #include <LittleFS.h>
 #include <freertos/semphr.h>
 
-// g_terminal_id is defined in main.cpp and loaded from LittleFS at boot
-extern char g_terminal_id[];
+extern char g_device_id[];  // derived from factory MAC in main.cpp
 
 #ifndef TX_LINE_MAX
 #define TX_LINE_MAX  80
@@ -142,7 +141,7 @@ bool storage_init() {
     const char* needed[] = {
         FILE_WHITELIST, FILE_BLACKLIST, FILE_TX_LOG,
         FILE_SYNC,      FILE_DRIVERS,   FILE_ADMINS, 
-        FILE_NET_MODE,  FILE_SYSCFG,    FILE_TERMINAL_ID  // FILE_TERMINAL_ID: OTA-safe identity store
+        FILE_NET_MODE,  FILE_SYSCFG
     };
     for (auto p : needed) {
         if (!LittleFS.exists(p)) {
@@ -193,65 +192,7 @@ StorageResult storage_write_fare(int fare_amount) {
     return STORAGE_OK;
 }
 
-// =============================================================================
-//  storage_read_terminal_id / storage_write_terminal_id
-//  OTA-safe identity: stored in LittleFS which is on a separate partition
-//  from the app partitions that OTA swaps. Identity survives firmware updates.
-// =============================================================================
-StorageResult storage_read_terminal_id(char* out, size_t sz) {
-    if (!out || sz < 2) return STORAGE_ERROR;
-    if (!_lock()) return STORAGE_ERROR;
 
-    File f = LittleFS.open(FILE_TERMINAL_ID, "r");
-    if (!f) {
-        File w = LittleFS.open(FILE_TERMINAL_ID, "w");
-        if (w) {
-            w.printf("%s\n", TERMINAL_ID_DEFAULT);
-            w.close();
-        }
-        _unlock();
-        strncpy(out, TERMINAL_ID_DEFAULT, sz - 1);
-        out[sz - 1] = '\0';
-        return STORAGE_NOT_FOUND;
-    }
-
-    char line[32];
-    int len = _read_line(f, line, sizeof(line));
-    f.close();
-
-    if (len > 0) {
-        strncpy(out, line, sz - 1);
-        out[sz - 1] = '\0';
-        _unlock();
-        return STORAGE_OK;
-    }
-
-    File w = LittleFS.open(FILE_TERMINAL_ID, "w");
-    if (w) {
-        w.printf("%s\n", TERMINAL_ID_DEFAULT);
-        w.close();
-    }
-    _unlock();
-
-    strncpy(out, TERMINAL_ID_DEFAULT, sz - 1);
-    out[sz - 1] = '\0';
-    return STORAGE_ERROR;
-}
-
-StorageResult storage_write_terminal_id(const char* id) {
-    if (!id) return STORAGE_ERROR;
-    if (!_lock()) return STORAGE_ERROR;
-
-    File f = LittleFS.open(FILE_TERMINAL_ID, "w");
-    if (!f) { _unlock(); return STORAGE_ERROR; }
-
-    f.printf("%s\n", id);
-    f.close();
-    _unlock();
-
-    LOG_INFO("STORAGE", "Terminal ID written: %s", id);
-    return STORAGE_OK;
-}
 
 // =============================================================================
 //  storage_uid_in_file
@@ -565,7 +506,7 @@ int storage_stream_tx_chunk(char* buf, size_t bufsz, size_t* bytes_read) {
         if (_read_line(f, line, sizeof(line)) == 0) continue;
 
         int plen = (lines == 0)
-            ? snprintf(piece, sizeof(piece), "%s:%s",  g_terminal_id, line)
+            ? snprintf(piece, sizeof(piece), "%s:%s",  g_device_id, line)
             : snprintf(piece, sizeof(piece), "|%s",                   line);
 
         if (plen <= 0 || used + (size_t)plen + 1 >= bufsz) break;
