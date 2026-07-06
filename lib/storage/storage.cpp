@@ -38,11 +38,16 @@ static bool _has_space(size_t needed = 256) {
 // ── Read one line from an open file into a fixed buffer ───────────────────────
 static int _read_line(File& f, char* buf, size_t bufsz) {
     int len = 0;
-    while (f.available() && len < (int)bufsz - 1) {
-        char c = (char)f.read();
-        if (c == '\n') break;
-        if (c == '\r') continue;
-        buf[len++] = c;
+    // Use f.read() directly rather than gating on f.available() first.
+    // On LittleFS, f.available() can return 0 one byte early at EOF,
+    // causing the last line to be silently skipped when there is no
+    // trailing newline. Reading until read() returns -1 is EOF-safe.
+    while (len < (int)bufsz - 1) {
+        int c = f.read();
+        if (c < 0)    break;          // true EOF
+        if (c == '\n') break;         // end of line
+        if (c == '\r') continue;      // ignore CR
+        buf[len++] = (char)c;
     }
     buf[len] = '\0';
     return len;
