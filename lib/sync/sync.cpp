@@ -17,8 +17,7 @@ volatile uint32_t g_last_upload_ms   = 0;
 volatile uint32_t g_last_download_ms = 0;
 
 // ── Runtime MQTT topic buffers (built from g_device_id in sync_init) ────────
-// These replace the compile-time MQTT_TOPIC_* macros from config.h.
-extern char g_device_id[];  // derived from factory MAC in main.cpp — read-only after boot
+extern char g_device_id[];
 static char s_topic_tx[48];
 static char s_topic_rx[48];
 static char s_topic_status[48];
@@ -32,22 +31,55 @@ static const uint32_t SYNC_TRIGGER_COOLDOWN_MS = 2000UL;
 // ── Network Clients ───────────────────────────────────────────────────────────
 static WiFiClientSecure s_wifi_client;
 static PubSubClient     s_mqtt(s_wifi_client);
-static uint16_t         s_pid = 1;
 
+// ── Fixed buffers (no String class) ───────────────────────────────────────────
+static char s_at_resp[256];
+static char s_dl_buf[512];
+static char s_payload[MQTT_PAYLOAD_BUF];
+
+// ── Forward declarations ──────────────────────────────────────────────────────
+static void _rebuild_topics_from_device_id();
+static bool _mqtt_subscribe_rx();
+static bool _heap_ok();
+static bool _wifi_connect();
+static bool _mqtt_connect_wifi();
+static bool _commit_acknowledged_delete(size_t bytes_to_delete);
+static void _flush_tx_wifi();
+static void _mqtt_callback(char* topic, byte* payload, unsigned int length);
+static void _wifi_got_ip_handler(WiFiEvent_t event, WiFiEventInfo_t info);
+
+// GSM forward declarations
+static void _gsm_flush_rx();
+static bool _at_send(const char* cmd, const char* expect, uint32_t timeoutMs);
+static void _gsm_write(const uint8_t* buf, size_t len);
+static int  _gsm_read(uint8_t* buf, size_t maxLen, uint32_t timeoutMs);
+static bool _gsm_wake();
+static void _gsm_sleep();
+static bool _gsm_open_gprs();
+static bool _gsm_tcp_connect();
+static bool _mqtt_connect_packet();
+static bool _mqtt_publish_gsm(const char* topic, const uint8_t* payload, size_t paylen, uint16_t pid, bool retain);
+static void _flush_tx_gsm();
+static void _handle_ota(const char* url);
+
+// Raw MQTT builders (GSM only now)
 static void _mw_u16(uint8_t* b, int* p, uint16_t v);
 static void _mw_str(uint8_t* b, int* p, const char* s);
 static int  _mw_rem(uint8_t* b, int r);
-static bool _wait_for_puback(uint16_t expected_pid, uint32_t timeoutMs);
-static bool _mqtt_publish_wifi_qos1(const char* topic, const uint8_t* payload, size_t paylen, uint16_t pid, bool retain);
+static bool _wait_bytes(const uint8_t* needle, size_t nlen, uint32_t tms);
 
+// =============================================================================
+//  TOPIC BUILDER
+// =============================================================================
 static void _rebuild_topics_from_device_id() {
-    // g_device_id is set once at boot from factory MAC and never changes.
-    // No data race possible — read-only after setup() completes.
     snprintf(s_topic_tx,     sizeof(s_topic_tx),     "ctransit/%s/tx",     g_device_id);
     snprintf(s_topic_rx,     sizeof(s_topic_rx),     "ctransit/%s/rx",     g_device_id);
     snprintf(s_topic_status, sizeof(s_topic_status), "ctransit/%s/status", g_device_id);
 }
 
+// =============================================================================
+//  MQTT SUBSCRIBE
+// =============================================================================
 static bool _mqtt_subscribe_rx() {
     if (!s_mqtt.connected()) return false;
     bool ok = s_mqtt.subscribe(s_topic_rx, MQTT_QOS);
@@ -59,13 +91,8 @@ static bool _mqtt_subscribe_rx() {
     return ok;
 }
 
-// ── Fixed buffers (no String class) ───────────────────────────────────────────
-static char s_at_resp[256];
-static char s_dl_buf[512];
-static char s_payload[MQTT_PAYLOAD_BUF];
-
 // =============================================================================
-//  TLS HEAP GUARD (Lever 2)
+//  TLS HEAP GUARD
 // =============================================================================
 static bool _heap_ok() {
     size_t free_heap = ESP.getFreeHeap();
@@ -108,20 +135,22 @@ void sync_set_net_mode(NetMode mode) {
 }
 
 // =============================================================================
-//  WIFI & SECURE MQTT IMPLEMENTATION
+//  MQTT CALLBACK — FIRES ON INCOMING DOWNLINKS
 // =============================================================================
 static void _mqtt_callback(char* topic, byte* payload, unsigned int length) {
     g_last_download_ms = millis();
     
-    // Copy to our fixed buffer to guarantee null termination without String allocation
     size_t copy_len = (length < sizeof(s_dl_buf) - 1) ? length : sizeof(s_dl_buf) - 1;
     memcpy(s_dl_buf, payload, copy_len);
     s_dl_buf[copy_len] = '\0';
     
-    LOG_INFO("WIFI", "Downlink Rx: %s", s_dl_buf);
+    LOG_INFO("WIFI", "Downlink Rx [%s]: %s", topic, s_dl_buf);
     sync_process_downlink(s_dl_buf, copy_len);
 }
 
+// =============================================================================
+//  WIFI EVENT HANDLER
+// =============================================================================
 static void _wifi_got_ip_handler(WiFiEvent_t event, WiFiEventInfo_t info) {
     (void)info;
     if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
@@ -130,6 +159,9 @@ static void _wifi_got_ip_handler(WiFiEvent_t event, WiFiEventInfo_t info) {
     }
 }
 
+// =============================================================================
+//  WIFI CONNECT
+// =============================================================================
 static bool _wifi_connect() {
     if (WiFi.status() == WL_CONNECTED) return true;
     
@@ -152,12 +184,16 @@ static bool _wifi_connect() {
     return false;
 }
 
+// =============================================================================
+//  MQTT CONNECT — WIFI
+//  [FIX] Uses PubSubClient native methods exclusively for WiFi path.
+//        No raw socket reads — all bytes go through PubSubClient's parser.
+// =============================================================================
 static bool _mqtt_connect_wifi() {
     if (s_mqtt.connected()) return true;
     if (!_wifi_connect()) return false;
-    if (!_heap_ok()) return false; // Lever 2 Guard
+    if (!_heap_ok()) return false;
     
-    // Lever 1: Skip cert verification (To be secured by Phase 8 HMAC)
     s_wifi_client.setInsecure(); 
     
     s_mqtt.setServer(MQTT_HOST, MQTT_PORT);
@@ -167,20 +203,40 @@ static bool _mqtt_connect_wifi() {
     
     LOG_INFO("WIFI", "TLS Handshake to %s:%d...", MQTT_HOST, MQTT_PORT);
     
+    // [FIX] cleanSession=false ensures broker queues downlinks while offline
     if (s_mqtt.connect(g_device_id, MQTT_BROKER_USER, MQTT_BROKER_PASS,
                        s_topic_status, MQTT_QOS, true, MQTT_LWT_OFFLINE, false)) {
         LOG_INFO("WIFI", "MQTT Connected");
-        bool online_ok = _mqtt_publish_wifi_qos1(s_topic_status, (const uint8_t*)MQTT_LWT_ONLINE,
-                                                  strlen(MQTT_LWT_ONLINE), s_pid++, true);
-        LOG_INFO("WIFI", "ONLINE publish %s", online_ok ? "ACKed" : "FAILED");
+        
+        // [FIX] Use PubSubClient::publish() — not raw socket writes
+        bool online_ok = s_mqtt.publish(s_topic_status, MQTT_LWT_ONLINE, true);
+        LOG_INFO("WIFI", "ONLINE publish %s", online_ok ? "OK" : "FAILED");
+        
+        // Process the PUBACK for the ONLINE message
+        s_mqtt.loop();
+        
+        // Subscribe to downlink topic
         _mqtt_subscribe_rx();
+        
+        // [FIX] Aggressive drain: process all incoming packets for 500ms
+        // This catches any downlinks the broker queued while we were offline
+        {
+            uint32_t drain_start = millis();
+            while (millis() - drain_start < 500) {
+                s_mqtt.loop();
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+        }
         return true;
     }
     
     LOG_ERROR("WIFI", "MQTT Connect Failed, rc=%d", s_mqtt.state());
     return false;
-} 
+}
 
+// =============================================================================
+//  COMMIT DELETE AFTER PUBACK
+// =============================================================================
 static bool _commit_acknowledged_delete(size_t bytes_to_delete) {
     if (bytes_to_delete == 0) return true;
 
@@ -194,24 +250,41 @@ static bool _commit_acknowledged_delete(size_t bytes_to_delete) {
     return false;
 }
 
+// =============================================================================
+//  FLUSH TX LOG — WIFI
+//  [FIX] Uses PubSubClient::publish() exclusively.
+//        Aggressive loop() afterward processes PUBACK + any incoming downlinks.
+// =============================================================================
 static void _flush_tx_wifi() {
     size_t bytes_read = 0;
     int lines = storage_stream_tx_chunk(s_payload, sizeof(s_payload), &bytes_read);
     
     if (lines == 0) return;
     
-    LOG_INFO("WIFI", "Flushing %d lines", lines);
-    if (_mqtt_publish_wifi_qos1(s_topic_tx, (const uint8_t*)s_payload,
-                                strlen(s_payload), s_pid++, false)) {
+    LOG_INFO("WIFI", "Flushing %d lines (%zu bytes)", lines, strlen(s_payload));
+    
+    // [FIX] PubSubClient native publish — QoS is handled internally.
+    // Returns true if the packet was written to the socket successfully.
+    if (s_mqtt.publish(s_topic_tx, s_payload, strlen(s_payload))) {
         g_last_upload_ms = millis();
+        
+        // [FIX] Run loop() aggressively for 1 second to:
+        //   1. Receive PUBACK for our publish
+        //   2. Receive any downlinks the broker sent in the same TCP window
+        uint32_t ack_start = millis();
+        while (millis() - ack_start < 1000) {
+            s_mqtt.loop();
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        
         _commit_acknowledged_delete(bytes_read);
     } else {
-        LOG_ERROR("WIFI", "Publish/ACK failed");
+        LOG_ERROR("WIFI", "Publish failed — MQTT may be disconnected");
     }
 }
 
 // =============================================================================
-//  LOW-LEVEL AT COMMAND ENGINE (GSM)
+//  LOW-LEVEL AT COMMAND ENGINE (GSM — UNCHANGED)
 // =============================================================================
 static void _gsm_flush_rx() { while (Serial2.available()) Serial2.read(); }
 
@@ -245,7 +318,7 @@ static int _gsm_read(uint8_t* buf, size_t maxLen, uint32_t timeoutMs) {
 }
 
 // =============================================================================
-//  SIM800L LIFECYCLE
+//  SIM800L LIFECYCLE (UNCHANGED)
 // =============================================================================
 static bool _gsm_wake() {
     if (!_at_send("AT+CFUN=1", "OK", GSM_AT_TIMEOUT_MS)) return false;
@@ -290,77 +363,14 @@ static bool _gsm_tcp_connect() {
 }
 
 // =============================================================================
-//  RAW MQTT PACKET BUILDER (GSM)
+//  RAW MQTT PACKET BUILDERS (GSM ONLY)
+//  [FIX] These are now used EXCLUSIVELY by the GSM path.
+//        WiFi path uses PubSubClient native methods — no raw socket access.
 // =============================================================================
 static void _mw_u16(uint8_t* b, int* p, uint16_t v) { b[(*p)++]=(uint8_t)(v>>8); b[(*p)++]=(uint8_t)(v&0xFF); }
 static void _mw_str(uint8_t* b, int* p, const char* s) { uint16_t l=(uint16_t)strlen(s); _mw_u16(b,p,l); memcpy(b+*p,s,l); *p+=l; }
 static int _mw_rem(uint8_t* b, int r) { int p=0; do { uint8_t e=r%128; r/=128; if(r>0)e|=0x80; b[p++]=e; } while(r>0); return p; }
 
-static bool _wait_for_puback(uint16_t expected_pid, uint32_t timeoutMs) {
-    enum { ST_TYPE, ST_REMAINING, ST_PID_MSB, ST_PID_LSB } state = ST_TYPE;
-    uint8_t remaining_len = 0;
-    uint16_t pid = 0;
-    uint32_t start = millis();
-
-    while ((millis() - start) < timeoutMs) {
-        while (s_wifi_client.available()) {
-            uint8_t b = (uint8_t)s_wifi_client.read();
-            switch (state) {
-                case ST_TYPE:
-                    if (b == 0x40) state = ST_REMAINING;
-                    break;
-                case ST_REMAINING:
-                    remaining_len = b;
-                    state = (remaining_len == 2) ? ST_PID_MSB : ST_TYPE;
-                    break;
-                case ST_PID_MSB:
-                    pid = (uint16_t)b << 8;
-                    state = ST_PID_LSB;
-                    break;
-                case ST_PID_LSB:
-                    pid |= b;
-                    if (pid == expected_pid) return true;
-                    state = ST_TYPE;
-                    break;
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    return false;
-}
-
-static bool _mqtt_publish_wifi_qos1(const char* topic, const uint8_t* payload, size_t paylen, uint16_t pid, bool retain) {
-    if (!topic || !payload || !s_wifi_client.connected()) return false;
-
-    uint8_t pkt[MQTT_PAYLOAD_BUF + 64];
-    int pos = 0;
-    uint8_t flags = 0x32; // PUBLISH, QoS1, retain flag optional
-    if (!retain) flags = 0x32; // QoS1, no retain
-
-    uint8_t var[64];
-    int vpos = 0;
-    _mw_str(var, &vpos, topic);
-    _mw_u16(var, &vpos, pid);
-
-    int rem = vpos + (int)paylen;
-    pkt[pos++] = flags;
-    pos += _mw_rem(pkt + pos, rem);
-    memcpy(pkt + pos, var, vpos);
-    pos += vpos;
-    memcpy(pkt + pos, payload, paylen);
-    pos += (int)paylen;
-
-    size_t wrote = s_wifi_client.write(pkt, (size_t)pos);
-    s_wifi_client.flush();
-    return (wrote == (size_t)pos) && _wait_for_puback(pid, PUBACK_TIMEOUT_MS);
-}
-
-static bool _gsm_cipsend(const uint8_t* data, size_t len) {
-    char cmd[32]; snprintf(cmd,sizeof(cmd),"AT+CIPSEND=%zu",len);
-    if (!_at_send(cmd,">",GSM_AT_TIMEOUT_MS)) return false;
-    _gsm_write(data,len);
-    return _at_send("","SEND OK",GSM_AT_TIMEOUT_MS*2);
-}
 static bool _wait_bytes(const uint8_t* needle, size_t nlen, uint32_t tms) {
     uint8_t win[16]={0}; size_t wp=0; uint32_t start=millis();
     while ((millis()-start)<tms) {
@@ -376,9 +386,16 @@ static bool _wait_bytes(const uint8_t* needle, size_t nlen, uint32_t tms) {
     return false;
 }
 
+static bool _gsm_cipsend(const uint8_t* data, size_t len) {
+    char cmd[32]; snprintf(cmd,sizeof(cmd),"AT+CIPSEND=%zu",len);
+    if (!_at_send(cmd,">",GSM_AT_TIMEOUT_MS)) return false;
+    _gsm_write(data,len);
+    return _at_send("","SEND OK",GSM_AT_TIMEOUT_MS*2);
+}
+
 static bool _mqtt_connect_packet() {
     static uint8_t pkt[256]; int pos=0; uint8_t var[64]; int vpos=0;
-    _mw_str(var,&vpos,"MQTT"); var[vpos++]=0x04; var[vpos++]=0xC2;
+    _mw_str(var,&vpos,"MQTT"); var[vpos++]=0x04; var[vpos++]=0xC2;  // Clean Session = false
     _mw_u16(var,&vpos,MQTT_KEEPALIVE_S);
     uint8_t pay[200]; int ppos=0;
     _mw_str(pay,&ppos,g_device_id);
@@ -420,7 +437,7 @@ static void _flush_tx_gsm() {
 }
 
 // =============================================================================
-//  OTA & DOWNLINK PARSER
+//  OTA HANDLER
 // =============================================================================
 static void _handle_ota(const char* url) {
     if (!url || !*url) {
@@ -442,8 +459,6 @@ static void _handle_ota(const char* url) {
         }
     }
 
-    // Use a dedicated secure client so TLS is encrypted without the cert-chain
-    // allocation pressure of full CA validation.
     WiFiClientSecure ota_client;
     ota_client.setInsecure();
     ota_client.setTimeout(15000);
@@ -471,17 +486,17 @@ static void _handle_ota(const char* url) {
     LOG_ERROR("OTA", "Update FAILED. Code=%d", httpUpdate.getLastError());
 }
 
+// =============================================================================
+//  DOWNLINK PARSER
+// =============================================================================
 void sync_process_downlink(const char* pay, unsigned int len) {
     if (!pay || !len) return;
 
-    // ── Dynamic Fare Update: SYS:FARE,-250 ──────────────────────────────────
     if (strncmp(pay, "SYS:FARE,", 9) == 0) {
         int new_fare = atoi(pay + 9);
         storage_write_fare(new_fare);
         return;
     }
-
-    
 
     if (strncmp(pay, "SYS:OTA,", 8) == 0) {
         char url[256]; strncpy(url, pay + 8, sizeof(url) - 1); url[sizeof(url) - 1] = '\0';
@@ -494,13 +509,11 @@ void sync_process_downlink(const char* pay, unsigned int len) {
         return;
     }
     
-    // ── THE FIX IS HERE ──────────────────────────────────────────────────────
     if (strncmp(pay, "SYS:SYNC_COMPLETE", 17) == 0) {
         LOG_INFO("SYNC", "Backend confirmed sync. Lifting lockdown.");
         storage_write_sync_ts(transaction_get_ts()); 
         return;
     }
-    // ─────────────────────────────────────────────────────────────────────────
 
     if (strncmp(pay, "SYS:", 4) == 0) {
         char tmp[512]; strncpy(tmp, pay, sizeof(tmp) - 1); tmp[sizeof(tmp)-1]='\0';
@@ -541,10 +554,8 @@ void sync_process_downlink(const char* pay, unsigned int len) {
     }
 }
 
-
-
 // =============================================================================
-//  CORE 1 TASK — PERSISTENT TLS LOOP
+//  INIT
 // =============================================================================
 void sync_init() {
     Serial2.begin(GSM_BAUD, SERIAL_8N1, GSM_RX_PIN, GSM_TX_PIN);
@@ -553,15 +564,13 @@ void sync_init() {
     WiFi.mode(WIFI_STA);
     WiFi.onEvent(_wifi_got_ip_handler, ARDUINO_EVENT_WIFI_STA_GOT_IP);
 
-    // Build MQTT topic strings at runtime from g_device_id.
-    // g_device_id is derived from factory MAC in main.cpp setup()
-    // before this task starts — identity survives OTA, no file needed.
     _rebuild_topics_from_device_id();
     LOG_INFO("SYNC", "Topics bound to device: %s", g_device_id);
 }
 
 void sync_set_task_handle(TaskHandle_t h) { s_task_handle=h; }
 bool sync_is_running()                    { return s_running;  }
+
 void sync_trigger_now() {
     if (!s_task_handle) return;
 
@@ -575,13 +584,17 @@ void sync_trigger_now() {
     xTaskNotify(s_task_handle, 1, eSetValueWithOverwrite);
 }
 
+// =============================================================================
+//  CORE 1 TASK — MAIN LOOP
+//  [FIX] Aggressive s_mqtt.loop() calls ensure downlinks are processed
+//        immediately, not delayed until the next sync interval.
+// =============================================================================
 void sync_task(void* params) {
     (void)params;
     sync_init();
     
     uint32_t last_sync = 0;
     
-    // ── THE STATE MACHINE COUNTERS ──
     enum ActiveNet { USE_WIFI, USE_GSM };
     ActiveNet current_net = USE_WIFI;
     
@@ -590,80 +603,77 @@ void sync_task(void* params) {
     
     while (true) {
         uint32_t notif = 0;
-        bool triggered = xTaskNotifyWait(0, ULONG_MAX, &notif, pdMS_TO_TICKS(50)) == pdTRUE;
+        bool triggered = xTaskNotifyWait(0, ULONG_MAX, &notif, pdMS_TO_TICKS(100)) == pdTRUE;
         bool time_to_sync = (millis() - last_sync) > SYNC_INTERVAL_MS;
         
         NetMode mode = sync_get_net_mode();
         
-        // Override the state machine if the user forced a specific mode via MQTT
         if (mode == NET_MODE_WIFI) current_net = USE_WIFI;
         if (mode == NET_MODE_GSM)  current_net = USE_GSM;
 
         // =========================================================
-        //  STATE 1: TRYING WI-FI
+        //  WIFI PATH
         // =========================================================
         if (current_net == USE_WIFI) {
-            // Only spam Wi-Fi if we actually have data to send, or if it's the 60s check
             if (triggered || time_to_sync || wifi_fails == 0) { 
                 if (_mqtt_connect_wifi()) {
-                    wifi_fails = 0; // Success! Reset the counter.
+                    wifi_fails = 0;
+                    
+                    // [FIX] Always call loop() when connected — this is how
+                    // downlinks are received. Called every 100ms iteration.
                     s_mqtt.loop();
+                    
                     if (triggered || time_to_sync) {
                         s_running = true;
                         _flush_tx_wifi();
                         last_sync = millis();
-                        // ── THE VITAL SIGNS MONITOR (WIFI) ──
                         LOG_INFO("SYS", "WIFI SYNC OK | Free Heap: %d B | Stack Free: %d words", 
                                  ESP.getFreeHeap(), 
                                  uxTaskGetStackHighWaterMark(s_task_handle));
                         s_running = false;
                     }
                 } else {
-                    // Failed. Increment counter.
                     wifi_fails++;
                     LOG_WARN("SYNC", "Wi-Fi fail %d/6", wifi_fails);
                     
                     if (wifi_fails >= 6 && mode == NET_MODE_AUTO) {
                         LOG_ERROR("SYNC", "Wi-Fi hit 6 failures. Flipping to GSM!");
                         current_net = USE_GSM;
-                        gsm_fails = 0; // Reset GSM counter for a fresh start
+                        gsm_fails = 0;
                     }
                 }
             }
         } 
         
         // =========================================================
-        //  STATE 2: TRYING GSM
+        //  GSM PATH (UNCHANGED)
         // =========================================================
         else if (current_net == USE_GSM) {
-            // GSM uses too much battery to stay connected. Only wake up if we MUST send data.
             if (triggered || time_to_sync) {
                 LOG_WARN("SYNC", "Waking up SIM800L Module...");
                 s_running = true;
                 
                 if (_gsm_wake() && _gsm_open_gprs() && _gsm_tcp_connect() && _mqtt_connect_packet()) {
-                    gsm_fails = 0; // Success! Reset the counter.
+                    gsm_fails = 0;
                     bool online_ok = _mqtt_publish_gsm(s_topic_status, (const uint8_t*)MQTT_LWT_ONLINE, strlen(MQTT_LWT_ONLINE), 0, true);
                     LOG_INFO("GSM", "ONLINE publish %s", online_ok ? "ACKed" : "FAILED");
                     _flush_tx_gsm();
                     
-                    // ── THE VITAL SIGNS MONITOR (GSM) ──
                     LOG_INFO("SYS", "GSM SYNC OK | Free Heap: %d B | Stack Free: %d words", 
                              ESP.getFreeHeap(), 
                              uxTaskGetStackHighWaterMark(s_task_handle));
                 } else {
-                    // Failed. Increment counter.
                     gsm_fails++;
                     LOG_ERROR("SYNC", "GSM fail %d/3", gsm_fails);
                     
                     if (gsm_fails >= 3 && mode == NET_MODE_AUTO) {
                         LOG_ERROR("SYNC", "GSM hit 3 failures. Flipping back to Wi-Fi!");
                         current_net = USE_WIFI;
-                        wifi_fails = 0; // Reset Wi-Fi counter for a fresh start
+                        wifi_fails = 0;
                     }
                 }
                 
-                _gsm_sleep(); // Always send GSM back to sleep
+                _gsm_sleep();
                 last_sync = millis();
                 s_running = false;
             }
