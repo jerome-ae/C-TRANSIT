@@ -365,6 +365,12 @@ static void handle_ready_tap(const char* uid) {
                 sm_transition(STATE_READY);
             } else if (tr == TX_LOG_FULL) {
                 sm_transition(STATE_HARD_LOCKDOWN);
+            } else if (tr == TX_NOT_TIME_SYNCED) {
+                sm_transition(STATE_DENIED);
+                display_show_2line(" TIME NOT SYNC", " Please Wait  ");
+                ui_feedback_rejected();
+                ui_delay(LCD_RESULT_MS);
+                sm_transition(STATE_READY);
             } else {
                 display_show_2line(" WRITE ERROR  ", "  Try Again   ");
                 ui_feedback_rejected();
@@ -468,6 +474,18 @@ static void handle_register_tap(const char* uid) {
 }
 
 // =============================================================================
+//  check_lockdown_release  
+// =============================================================================
+static void check_lockdown_release() {
+    unsigned long sync_ts = storage_read_sync_ts();
+    unsigned long now     = transaction_get_ts();
+    if (sync_ts == 0) return;
+    unsigned long off = (now > sync_ts) ? (now - sync_ts) : 0;
+    if (off < SYNC_TIMEOUT_SECONDS) {
+        LOG_INFO("MAIN", "Lockdown released — last sync %lus ago", off);
+        sm_transition(STATE_READY);
+    }
+}
 //  check_lockdown_release  
 // =============================================================================
 static void check_lockdown_release() {
