@@ -11,6 +11,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
+#include <time.h>
 
 // ── Exported timestamps (read by Core 0 LCD animation) ───────────────────────
 volatile uint32_t g_last_upload_ms   = 0;
@@ -42,6 +43,7 @@ static void _rebuild_topics_from_device_id();
 static bool _mqtt_subscribe_rx();
 static bool _heap_ok();
 static bool _wifi_connect();
+static bool _ntp_sync_time();
 static bool _mqtt_connect_wifi();
 static bool _commit_acknowledged_delete(size_t bytes_to_delete);
 static void _flush_tx_wifi();
@@ -178,10 +180,49 @@ static bool _wifi_connect() {
         char ipbuf[16];
         snprintf(ipbuf, sizeof(ipbuf), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
         LOG_INFO("WIFI", "Connected. IP: %s", ipbuf);
+        _ntp_sync_time();
         return true;
     }
     LOG_WARN("WIFI", "Connection timeout");
     return false;
+}
+
+// =============================================================================
+//  NTP TIME SYNC (Wi-Fi path)
+//  Seeds transaction.cpp's RTC (transaction_set_rtc) with a real epoch time
+//  so tx.log timestamps stop falling back to seconds-since-boot. No-op if
+//  we're already synced (e.g. a broker-pushed SYS:TIME already landed, or
+//  a previous Wi-Fi session already set it — RTC survives reconnects).
+// =============================================================================
+static bool _ntp_sync_time() {
+    if (transaction_time_synced()) return true;
+
+    LOG_INFO("NTP", "Requesting time from %s / %s...", NTP_SERVER_1, NTP_SERVER_2);
+    configTime(NTP_GMT_OFFSET_SEC, NTP_DST_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
+
+    struct tm timeinfo;
+    uint32_t start = millis();
+    bool got_time = false;
+    while ((millis() - start) < NTP_SYNC_TIMEOUT_MS) {
+        if (getLocalTime(&timeinfo, 250)) { got_time = true; break; }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    if (!got_time) {
+        LOG_WARN("NTP", "Sync timed out — will retry on next Wi-Fi connect or wait for broker time");
+        return false;
+    }
+
+    time_t now;
+    time(&now);
+    if ((unsigned long)now < MIN_VALID_EPOCH) {
+        LOG_WARN("NTP", "Got implausible epoch=%lu, discarding", (unsigned long)now);
+        return false;
+    }
+
+    transaction_set_rtc((unsigned long)now);
+    LOG_INFO("NTP", "Time synced via NTP: epoch=%lu", (unsigned long)now);
+    return true;
 }
 
 // =============================================================================
@@ -503,6 +544,17 @@ void sync_process_downlink(const char* pay, unsigned int len) {
         _handle_ota(url); return;
     }
     
+    if (strncmp(pay, "SYS:TIME,", 9) == 0) {
+        unsigned long epoch = strtoul(pay + 9, nullptr, 10);
+        if (epoch >= MIN_VALID_EPOCH) {
+            transaction_set_rtc(epoch);
+            LOG_INFO("SYNC", "Time synced via broker: epoch=%lu", epoch);
+        } else {
+            LOG_WARN("SYNC", "Ignored implausible SYS:TIME payload: %s", pay);
+        }
+        return;
+    }
+
     if (strncmp(pay, "SYS:NET,", 8) == 0) {
         int mode = atoi(pay + 8);
         if (mode >= 0 && mode <= 2) sync_set_net_mode((NetMode)mode);
