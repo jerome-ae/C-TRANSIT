@@ -27,6 +27,16 @@ typedef enum {
 #define WIFI_PASS               "laplace1"
 #define WIFI_CONNECT_TIMEOUT_MS 20000UL
 
+// ── 4b. TIME SYNC (NTP + broker-pushed) ───────────────────────────────────────
+#define NTP_SERVER_1        "pool.ntp.org"
+#define NTP_SERVER_2        "time.nist.gov"
+#define NTP_GMT_OFFSET_SEC  0     // terminal logs in UTC; convert at backend/UI
+#define NTP_DST_OFFSET_SEC  0
+#define NTP_SYNC_TIMEOUT_MS 8000UL
+// Any epoch below this is treated as "not a real time" (sanity guard against
+// NTP/broker glitches handing us garbage) — corresponds to ~2020-09-13.
+#define MIN_VALID_EPOCH     1600000000UL
+
 // ── 5. GSM / SIM800L (UART2) ──────────────────────────────────────────────────
 #define GSM_RX_PIN          16
 #define GSM_TX_PIN          17
