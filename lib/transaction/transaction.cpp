@@ -20,9 +20,21 @@ unsigned long transaction_get_ts(){
     }
 }
 
+bool transaction_time_synced(){
+    return s_base != 0;
+}
+
 TransactionResult transaction_record(const char* uid, const char* drv){
     if(!uid || !drv) return TX_ERROR;
-    
+
+    // Refuse to record a transaction until we have a real, RTC-seeded
+    // timestamp (via NTP or a broker-pushed SYS:TIME). Without this,
+    // ts would silently fall back to seconds-since-boot in transaction_get_ts().
+    if(!transaction_time_synced()){
+        LOG_WARN("TX", "Reject uid=%s: not yet time-synced", uid);
+        return TX_NOT_TIME_SYNCED;
+    }
+
     unsigned long ts = transaction_get_ts();
     
     // ── THE FIX: Fetch the fare from the LittleFS system config file
