@@ -350,6 +350,22 @@ static void handle_offline_locked_tap(const char* uid) {
 static void handle_ready_tap(const char* uid) {
     sm_transition(STATE_PROCESSING);
 
+    // ── Time sync guard: must check BEFORE auth validation ──────────────
+    // If the clock hasn't synced yet (NTP still polling, GSM tower query
+    // in progress), reject immediately with a clear message. This must
+    // run before auth_validate_tap() because that function can return
+    // STUDENT_SYNC_REQUIRED based on sync timestamp age, which would
+    // incorrectly push the terminal into HARD_LOCKDOWN when the real
+    // problem is just that we're still waiting for a time source.
+    if (!transaction_time_synced()) {
+        sm_transition(STATE_DENIED);
+        display_show_2line(" TIME NOT SYNC", " Please Wait  ");
+        ui_feedback_rejected();
+        ui_delay(LCD_RESULT_MS);
+        sm_transition(STATE_READY);
+        return;
+    }
+
     unsigned long now = transaction_get_ts();
     int tap_cnt = 0;
     StudentValidResult vr = auth_validate_tap(uid, now, &tap_cnt);
@@ -366,6 +382,8 @@ static void handle_ready_tap(const char* uid) {
             } else if (tr == TX_LOG_FULL) {
                 sm_transition(STATE_HARD_LOCKDOWN);
             } else if (tr == TX_NOT_TIME_SYNCED) {
+                // This path should no longer be reachable due to the guard
+                // above, but kept as defense-in-depth.
                 sm_transition(STATE_DENIED);
                 display_show_2line(" TIME NOT SYNC", " Please Wait  ");
                 ui_feedback_rejected();
@@ -418,7 +436,6 @@ static void handle_ready_tap(const char* uid) {
             break; 
     }
 }
-
 // =============================================================================
 //  handle_register_tap
 // =============================================================================
@@ -474,18 +491,6 @@ static void handle_register_tap(const char* uid) {
 }
 
 // =============================================================================
-//  check_lockdown_release  
-// =============================================================================
-static void check_lockdown_release() {
-    unsigned long sync_ts = storage_read_sync_ts();
-    unsigned long now     = transaction_get_ts();
-    if (sync_ts == 0) return;
-    unsigned long off = (now > sync_ts) ? (now - sync_ts) : 0;
-    if (off < SYNC_TIMEOUT_SECONDS) {
-        LOG_INFO("MAIN", "Lockdown released — last sync %lus ago", off);
-        sm_transition(STATE_READY);
-    }
-}
 //  check_lockdown_release  
 // =============================================================================
 static void check_lockdown_release() {

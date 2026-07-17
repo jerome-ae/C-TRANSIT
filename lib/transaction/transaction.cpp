@@ -5,17 +5,22 @@ static unsigned long s_base = 0;
 static unsigned long s_anchor_ms = 0;
 
 void transaction_set_rtc(unsigned long ts){
-    s_base = ts; 
+    if (ts < MIN_VALID_EPOCH) {
+        LOG_ERROR("TX", "RTC seed rejected: ts=%lu below minimum valid epoch (%lu)", ts, (unsigned long)MIN_VALID_EPOCH);
+        return;
+    }
+    s_base = ts;
     s_anchor_ms = millis();
     LOG_INFO("TX", "RTC seeded ts=%lu", ts);
 }
 
 unsigned long transaction_get_ts(){
     if (s_base == 0) {
-        // Fallback if RTC was never seeded (should be blocked by state machine)
-        return millis() / 1000UL;
+        // Clock not seeded — return 0 so callers can detect invalid time.
+        // transaction_time_synced() should be checked before relying on this value.
+        return 0;
     } else {
-        // Rollover-safe calculation
+        // Rollover-safe calculation: real epoch at seed + seconds elapsed since
         return s_base + ((millis() - s_anchor_ms) / 1000UL);
     }
 }

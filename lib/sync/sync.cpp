@@ -709,6 +709,57 @@ void sync_task(void* params) {
                     gsm_fails = 0;
                     bool online_ok = _mqtt_publish_gsm(s_topic_status, (const uint8_t*)MQTT_LWT_ONLINE, strlen(MQTT_LWT_ONLINE), 0, true);
                     LOG_INFO("GSM", "ONLINE publish %s", online_ok ? "ACKed" : "FAILED");
+                    
+                    // ── GSM Time Sync via Cell Tower ─────────────────────────
+                    if (!transaction_time_synced()) {
+                        LOG_INFO("GSM", "Requesting network time from tower...");
+                        
+                        _at_send("AT+CLTS=1", "OK", GSM_AT_TIMEOUT_MS);
+                        
+                        if (_at_send("AT+CCLK?", "+CCLK:", GSM_AT_TIMEOUT_MS)) {
+                            char* cclk = strstr(s_at_resp, "+CCLK:");
+                            if (cclk) {
+                                char* q1 = strchr(cclk, '"');
+                                if (q1) {
+                                    int yr = 0, mo = 0, dy = 0, hr = 0, mn = 0, sc = 0, tz_hr = 0, tz_mn = 0;
+                                    char tz_sign = '+';
+                                    
+                                    int fields = sscanf(q1 + 1, "%2d/%2d/%2d,%2d:%2d:%2d%c%2d",
+                                                       &yr, &mo, &dy, &hr, &mn, &sc, &tz_sign, &tz_mn);
+                                    
+                                    if (fields >= 6) {
+                                        struct tm t = {};
+                                        t.tm_year = yr + 100;
+                                        t.tm_mon  = mo - 1;
+                                        t.tm_mday = dy;
+                                        t.tm_hour = hr;
+                                        t.tm_min  = mn;
+                                        t.tm_sec  = sc;
+                                        
+                                        time_t epoch = mktime(&t);
+                                        
+                                        if (fields >= 7) {
+                                            int offset_sec = tz_hr * 3600 + tz_mn * 60;
+                                            if (tz_sign == '-') offset_sec = -offset_sec;
+                                            epoch -= offset_sec;
+                                        }
+                                        
+                                        if (epoch > 0 && (unsigned long)epoch >= MIN_VALID_EPOCH) {
+                                            transaction_set_rtc((unsigned long)epoch);
+                                            LOG_INFO("GSM", "Time synced via tower: epoch=%lu (UTC)", (unsigned long)epoch);
+                                        } else {
+                                            LOG_WARN("GSM", "Tower time invalid: epoch=%ld", (long)epoch);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if (!transaction_time_synced()) {
+                            LOG_WARN("GSM", "Tower time unavailable — will retry next cycle");
+                        }
+                    }
+                    
                     _flush_tx_gsm();
                     
                     LOG_INFO("SYS", "GSM SYNC OK | Free Heap: %d B | Stack Free: %d words", 

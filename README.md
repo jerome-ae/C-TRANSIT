@@ -272,3 +272,9 @@ pio device monitor --baud 115200
 ## Commit summary for the next change
 
 This update hardens the ESP32 transit terminal firmware for deployment by completing the offline-first sync path, improving MQTT reliability, and making persistence behavior consistent across boot, reconnect, and OTA-safe identity handling. The firmware now loads the terminal ID from LittleFS before the sync task starts, maintains a stable runtime topic namespace for uplink/downlink/status traffic, re-subscribes after reconnects and identity changes, and uses QoS 1 plus PUBACK-gated deletion so transactions are only removed from tx.log after successful broker acknowledgement. Storage is fully LittleFS-backed, payloads are built line-by-line from tx.log without byte-slicing transactions, and the code avoids dynamic String allocations in the network path to stay within the ESP32 memory constraints.
+
+
+NOTE:
+BACKEND LOAD
+If payload == "SYS:TIME_REQ":
+    publish to ctransit/{device_id}/rx: "SYS:TIME,<current_epoch>"

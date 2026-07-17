@@ -8,7 +8,7 @@
 // Last 3 bytes → 6-char hex string (e.g., "A1B2C3"). Immutable, survives OTA.
 // g_device_id[] is populated in main.cpp setup() before any task starts.
 #define DEVICE_ID_LEN       7          // "A1B2C3" + null         // includes null terminator
-#define FIRMWARE_VERSION     "v1.0.55L"
+#define FIRMWARE_VERSION     "v1.0.8L"
 
  
 // ── 2. OTA ────────────────────────────────────────────────────────────────────
