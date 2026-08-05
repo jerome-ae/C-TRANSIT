@@ -12,6 +12,7 @@
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <time.h>
+#include <esp_task_wdt.h>
 
 // ── Exported timestamps (read by Core 0 LCD animation) ───────────────────────
 volatile uint32_t g_last_upload_ms   = 0;
@@ -172,6 +173,7 @@ static bool _wifi_connect() {
     
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
+        esp_task_wdt_reset(); // Feed WDT — this loop can run up to 20s (WIFI_CONNECT_TIMEOUT_MS)
         vTaskDelay(pdMS_TO_TICKS(500));
     }
     
@@ -365,6 +367,7 @@ static bool _gsm_wake() {
     if (!_at_send("AT+CFUN=1", "OK", GSM_AT_TIMEOUT_MS)) return false;
     uint32_t start = millis();
     while ((millis() - start) < GSM_REG_TIMEOUT_MS) {
+        esp_task_wdt_reset(); // Feed WDT — this loop can run up to 30s (GSM_REG_TIMEOUT_MS)
         _gsm_flush_rx();
         Serial2.println("AT+CREG?");
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -507,7 +510,12 @@ static void _handle_ota(const char* url) {
     httpUpdate.rebootOnUpdate(false);
     httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
+    // Disable WDT for the duration of the OTA download — the HTTP download
+    // can legitimately take up to OTA_TIMEOUT_MS (120s), far beyond the
+    // 15s WDT window. We re-arm it via esp_task_wdt_reset() after the call.
+    esp_task_wdt_delete(nullptr);
     t_httpUpdate_return ret = httpUpdate.update(ota_client, url);
+    esp_task_wdt_add(nullptr); // Re-register after OTA completes or fails
 
     if (ret == HTTP_UPDATE_OK) {
         LOG_INFO("OTA", "Update SUCCESS. Finalizing flash...");
@@ -643,6 +651,10 @@ void sync_trigger_now() {
 // =============================================================================
 void sync_task(void* params) {
     (void)params;
+    // Register this task with the Task Watchdog Timer.
+    // If sync_task hangs (e.g. TLS deadlock, GSM AT timeout) for more than
+    // WDT_TIMEOUT_SECONDS (15s), the watchdog will trigger a panic + reboot.
+    esp_task_wdt_add(nullptr);
     sync_init();
     
     uint32_t last_sync = 0;
@@ -654,6 +666,10 @@ void sync_task(void* params) {
     uint8_t gsm_fails = 0;
     
     while (true) {
+        // Feed the watchdog once per loop iteration (~100ms cadence).
+        // This must be called regularly to prevent the 15s WDT from firing.
+        esp_task_wdt_reset();
+
         uint32_t notif = 0;
         bool triggered = xTaskNotifyWait(0, ULONG_MAX, &notif, pdMS_TO_TICKS(100)) == pdTRUE;
         bool time_to_sync = (millis() - last_sync) > SYNC_INTERVAL_MS;
