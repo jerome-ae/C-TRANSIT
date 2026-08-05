@@ -52,9 +52,15 @@ static void check_lockdown_release();
 static void run_ui_refresh();
 static void ui_delay(uint32_t ms); // Non-blocking delay for UI holds
 
-static uint32_t s_last_ui_refresh_ms = 0;
+static uint32_t s_last_ui_refresh_ms    = 0;
 static uint32_t s_last_rfid_watchdog_ms = 0;
-static bool     s_rfid_fault_alerted = false;
+static bool     s_rfid_fault_alerted    = false;
+
+// ── Idle sleep state ──────────────────────────────────────────────────────────
+// Tracks the last time any user activity (RFID tap or keypad press) was seen.
+// Only active in STATE_READY — other states (login, lockdown) are unaffected.
+static uint32_t s_last_activity_ms  = 0;
+static bool     s_display_is_asleep = false;
 
 // =============================================================================
 //  setup
@@ -212,12 +218,41 @@ static void rfid_ui_task(void* p) {
                     sm_transition(STATE_OFFLINE_LOCKED);
                 }
             }
+
+            // ── Idle sleep check (STATE_READY only) ──────────────────────────
+            // If no activity for IDLE_SLEEP_TIMEOUT_MS, blank the LCD.
+            // RFID polling continues uninterrupted — the reader stays active.
+            if (sm_get_state() == STATE_READY) {
+                if (!s_display_is_asleep &&
+                    (now_ms - s_last_activity_ms) >= IDLE_SLEEP_TIMEOUT_MS) {
+                    s_display_is_asleep = true;
+                    display_sleep();
+                }
+            } else {
+                // Leaving STATE_READY resets the idle clock and wakes the display
+                s_last_activity_ms  = now_ms;
+                if (s_display_is_asleep) {
+                    s_display_is_asleep = false;
+                    display_wake();
+                }
+            }
         }
 
         // ── Keypad poll (active in ride mode and registration mode) ─────────
         if (sm_get_state() == STATE_READY || sm_get_state() == STATE_REGISTER_MODE) {
             char key = keypad_get_key();
-            if (key) handle_mode_keypad(key);
+            if (key) {
+                // Any keypress counts as activity — wake display if sleeping
+                s_last_activity_ms = now_ms;
+                if (s_display_is_asleep) {
+                    s_display_is_asleep = false;
+                    display_wake();
+                } else {
+                    handle_mode_keypad(key);
+                }
+                // Note: if we just woke the display, we swallow the key so the
+                // driver doesn't accidentally trigger a logout with their first press.
+            }
         }
 
         // ── RFID subsystem watchdog ────────────────────────────────────────
@@ -239,6 +274,14 @@ static void rfid_ui_task(void* p) {
         RFIDResult rr = rfid_poll(uid);
 
         if (rr == RFID_NEW_CARD) {
+            // Any card tap counts as activity — wake display if sleeping first.
+            // We still dispatch the tap normally so the card is not lost.
+            s_last_activity_ms = now_ms;
+            if (s_display_is_asleep) {
+                s_display_is_asleep = false;
+                display_wake();
+            }
+
             LOG_INFO("MAIN", "Tap in state %s  uid=%s",
                      sm_state_name(sm_get_state()), uid);
 

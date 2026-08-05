@@ -19,3 +19,9 @@ void display_set_sync_indicators(bool upload_active, bool download_active);
 
 void display_clear();
 void display_set_backlight(bool on);
+
+// ── Idle sleep / wake ───────────────────────────────────────────────
+// Call display_sleep() after IDLE_SLEEP_TIMEOUT_MS of inactivity.
+// Call display_wake() on any RFID tap or keypad press to restore the screen.
+void display_sleep();   // clear screen + turn backlight off
+void display_wake();    // turn backlight on + restore idle screen

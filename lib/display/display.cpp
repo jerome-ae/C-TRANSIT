@@ -63,3 +63,22 @@ void display_set_sync_indicators(bool upload_active, bool download_active){
 
 void display_clear(){ s_lcd.clear(); }
 void display_set_backlight(bool on){ on?s_lcd.backlight():s_lcd.noBacklight(); }
+
+// ── Idle sleep / wake ──────────────────────────────────────────────────────────
+static bool s_display_sleeping = false;
+
+void display_sleep() {
+    if (s_display_sleeping) return;   // already asleep — no redundant I2C writes
+    s_lcd.clear();
+    s_lcd.noBacklight();
+    s_display_sleeping = true;
+    LOG_INFO("DISPLAY", "LCD sleep (idle timeout)");
+}
+
+void display_wake() {
+    if (!s_display_sleeping) return;  // already awake — no redundant I2C writes
+    s_lcd.backlight();
+    s_display_sleeping = false;
+    display_show_idle();              // restore the standard ">> Tap to Ride" screen
+    LOG_INFO("DISPLAY", "LCD wake (activity detected)");
+}

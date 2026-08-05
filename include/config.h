@@ -113,6 +113,7 @@ static const char    KEYPAD_MAP[4][4]   = {
 #define LED_FEEDBACK_MS           2000
 #define LCD_RESULT_MS             2000
 #define DEBOUNCE_DELAY_MS         8000UL
+#define IDLE_SLEEP_TIMEOUT_MS     30000UL  // 30s of inactivity in STATE_READY → LCD sleep
 
 // ── 10. FREERTOS ──────────────────────────────────────────────────────────────
 #define CORE_APP           0
