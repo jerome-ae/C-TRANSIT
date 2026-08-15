@@ -108,9 +108,9 @@ static const char    KEYPAD_MAP[4][4]   = {
 #define TX_LOG_MAX_LINES          2000
 #define MAX_OFFLINE_TAPS_PER_UID  2
 #define DEFAULT_FARE_AMOUNT       -200      // Global fallback fare (written by SYS:FARE,)
-#define DEFAULT_FARE_A            -200      // Default fare for Location A
+#define DEFAULT_FARE_A            -150      // Default fare for Location A
 #define DEFAULT_FARE_B            -200      // Default fare for Location B
-#define DEFAULT_FARE_C            -200      // Default fare for Location C
+#define DEFAULT_FARE_C            -300      // Default fare for Location C
 
 // ── Per-location fare file paths ───────────────────────────────────────────
 #define FILE_FARE_A   "/fare_a.dat"  // Fare for Location A (route-specific)
