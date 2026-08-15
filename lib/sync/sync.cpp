@@ -541,9 +541,36 @@ static void _handle_ota(const char* url) {
 void sync_process_downlink(const char* pay, unsigned int len) {
     if (!pay || !len) return;
 
+    // SYS:FARE_A / SYS:FARE_B / SYS:FARE_C — per-location fare updates
+    // NOTE: These must be checked BEFORE SYS:FARE, (shorter prefix) to avoid
+    // a false match where "SYS:FARE_A,-200" matches strncmp(pay,"SYS:FARE,",9).
+    if (strncmp(pay, "SYS:FARE_A,", 11) == 0) {
+        int fare = atoi(pay + 11);
+        storage_write_fare_for_loc('A', fare);
+        LOG_INFO("SYNC", "Fare[A] updated via downlink -> %d", fare);
+        return;
+    }
+    if (strncmp(pay, "SYS:FARE_B,", 11) == 0) {
+        int fare = atoi(pay + 11);
+        storage_write_fare_for_loc('B', fare);
+        LOG_INFO("SYNC", "Fare[B] updated via downlink -> %d", fare);
+        return;
+    }
+    if (strncmp(pay, "SYS:FARE_C,", 11) == 0) {
+        int fare = atoi(pay + 11);
+        storage_write_fare_for_loc('C', fare);
+        LOG_INFO("SYNC", "Fare[C] updated via downlink -> %d", fare);
+        return;
+    }
+
+    // SYS:FARE, — global fare: writes all three location fares simultaneously
     if (strncmp(pay, "SYS:FARE,", 9) == 0) {
         int new_fare = atoi(pay + 9);
-        storage_write_fare(new_fare);
+        storage_write_fare(new_fare);            // keep syscfg.dat in sync
+        storage_write_fare_for_loc('A', new_fare);
+        storage_write_fare_for_loc('B', new_fare);
+        storage_write_fare_for_loc('C', new_fare);
+        LOG_INFO("SYNC", "Global fare updated -> %d (all locations)", new_fare);
         return;
     }
 

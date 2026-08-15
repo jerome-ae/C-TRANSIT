@@ -62,6 +62,14 @@ static bool     s_rfid_fault_alerted    = false;
 static uint32_t s_last_activity_ms  = 0;
 static bool     s_display_is_asleep = false;
 
+// ── Active transport location ─────────────────────────────────────────────────
+// Driver selects A, B, or C with the corresponding keypad key.
+// Resets to 'A' on every new login so sessions always start at Location A.
+// s_active_fare is loaded from storage when location changes so subsequent
+// taps use the correct per-route fare without hitting the filesystem each time.
+static char s_active_location = 'A';
+static int  s_active_fare     = DEFAULT_FARE_A;
+
 // =============================================================================
 //  setup
 // =============================================================================
@@ -189,6 +197,12 @@ static void rfid_ui_task(void* p) {
     esp_task_wdt_add(nullptr);
     LOG_INFO("MAIN", "rfid_ui_task on Core %d", xPortGetCoreID());
 
+    // Load the fare for the default location (A) once at task start.
+    // This avoids a storage read on every tap; the fare is refreshed only
+    // when the driver explicitly switches locations via keypad keys A/B/C.
+    s_active_location = 'A';
+    s_active_fare     = storage_read_fare_for_loc('A');
+
     char uid[9] = {0};
 
     while (true) {
@@ -247,6 +261,9 @@ static void rfid_ui_task(void* p) {
                 if (s_display_is_asleep) {
                     s_display_is_asleep = false;
                     display_wake();
+                    // Restore location label after wake (display_wake calls display_show_idle)
+                    if (sm_get_state() == STATE_READY)
+                        display_show_location_ready(s_active_location);
                 } else {
                     handle_mode_keypad(key);
                 }
@@ -280,6 +297,9 @@ static void rfid_ui_task(void* p) {
             if (s_display_is_asleep) {
                 s_display_is_asleep = false;
                 display_wake();
+                // Restore location label on wake — display_wake() calls display_show_idle()
+                if (sm_get_state() == STATE_READY)
+                    display_show_location_ready(s_active_location);
             }
 
             LOG_INFO("MAIN", "Tap in state %s  uid=%s",
@@ -313,14 +333,48 @@ static void rfid_ui_task(void* p) {
 // =============================================================================
 static void handle_mode_keypad(char key) {
     switch (key) {
+        case 'A':
+            // Select Location A — load its fare from storage and update display
+            s_active_location = 'A';
+            s_active_fare     = storage_read_fare_for_loc('A');
+            display_show_location_ready('A');
+            LOG_INFO("MAIN", "Location A selected (fare=%d)", s_active_fare);
+            break;
+
+        case 'B':
+            // Select Location B — load its fare from storage and update display
+            s_active_location = 'B';
+            s_active_fare     = storage_read_fare_for_loc('B');
+            display_show_location_ready('B');
+            LOG_INFO("MAIN", "Location B selected (fare=%d)", s_active_fare);
+            break;
+
+        case 'C':
+            // Select Location C — load its fare from storage and update display
+            s_active_location = 'C';
+            s_active_fare     = storage_read_fare_for_loc('C');
+            display_show_location_ready('C');
+            LOG_INFO("MAIN", "Location C selected (fare=%d)", s_active_fare);
+            break;
+
+        case 'D':
+            // Cycle net mode: AUTO → WIFI → GSM → AUTO
+            // (Moved from key 'A' to free it for location selection)
+            if (sm_get_state() == STATE_READY) sm_cycle_net_mode();
+            // sm_cycle_net_mode shows NET MODE on LCD for 1.5s then
+            // calls _apply_state_effects(STATE_READY) → display_show_idle().
+            // Restore location-aware display after it returns.
+            if (sm_get_state() == STATE_READY)
+                display_show_location_ready(s_active_location);
+            break;
+
         case '#':
             LOG_INFO("MAIN", "Driver '%s' logout requested via keypad",
                      sm_get_driver_uid());
             sm_driver_logout();
-            break;
- 
-        case 'A':
-            if (sm_get_state() == STATE_READY) sm_cycle_net_mode();
+            // Reset active location so the next session always starts at A
+            s_active_location = 'A';
+            s_active_fare     = DEFAULT_FARE_A;
             break;
 
         default:
@@ -366,7 +420,11 @@ static void handle_offline_locked_tap(const char* uid) {
         case STAFF_AUTH_DRIVER_OK:
             sm_set_driver_uid(uid);
             sm_transition(STATE_READY);
-            LOG_INFO("MAIN", "Driver %s logged in", uid);
+            // Reset location to A and reload fare for the new session
+            s_active_location = 'A';
+            s_active_fare     = storage_read_fare_for_loc('A');
+            display_show_location_ready('A');  // override idle with location display
+            LOG_INFO("MAIN", "Driver %s logged in → Location A (fare=%d)", uid, s_active_fare);
             break;
         case STAFF_AUTH_ADMIN_OK:
             sm_set_driver_uid(uid);
@@ -415,7 +473,9 @@ static void handle_ready_tap(const char* uid) {
 
     switch (vr) {
         case STUDENT_APPROVED: {
-            TransactionResult tr = transaction_record(uid, sm_get_driver_uid());
+            TransactionResult tr = transaction_record(uid, sm_get_driver_uid(),
+                                                     s_active_fare, s_active_location);
+
             if (tr == TX_RECORDED) {
                 sm_transition(STATE_APPROVED);
                 ui_feedback_approved();

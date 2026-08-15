@@ -107,7 +107,15 @@ static const char    KEYPAD_MAP[4][4]   = {
 #define SYNC_TIMEOUT_SECONDS      10800UL   // 3-hour kill switch
 #define TX_LOG_MAX_LINES          2000
 #define MAX_OFFLINE_TAPS_PER_UID  2
-#define DEFAULT_FARE_AMOUNT       -200      // <-- ADDED: Default fallback fare
+#define DEFAULT_FARE_AMOUNT       -200      // Global fallback fare (written by SYS:FARE,)
+#define DEFAULT_FARE_A            -200      // Default fare for Location A
+#define DEFAULT_FARE_B            -200      // Default fare for Location B
+#define DEFAULT_FARE_C            -200      // Default fare for Location C
+
+// ── Per-location fare file paths ───────────────────────────────────────────
+#define FILE_FARE_A   "/fare_a.dat"  // Fare for Location A (route-specific)
+#define FILE_FARE_B   "/fare_b.dat"  // Fare for Location B (route-specific)
+#define FILE_FARE_C   "/fare_c.dat"  // Fare for Location C (route-specific)
 #define BEEP_SHORT_MS             150
 #define BEEP_LONG_MS              800
 #define LED_FEEDBACK_MS           2000

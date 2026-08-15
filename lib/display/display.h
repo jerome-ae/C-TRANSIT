@@ -4,6 +4,7 @@
 
 bool display_init();
 void display_show_idle();
+void display_show_location_ready(char loc);  // Shows "C-TRANSIT [A/B/C] / >> Tap to Ride"
 void display_show_2line(const char* l1,const char* l2);
 void display_show_status(const char* msg);
 void display_show_otp(uint32_t otp);

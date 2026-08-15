@@ -34,6 +34,14 @@ bool display_init(){
 }
 
 void display_show_idle(){ _pad(0,"  C-TRANSIT    "); _pad(1," >> Tap to Ride"); }
+
+void display_show_location_ready(char loc) {
+    char row0[17];
+    snprintf(row0, sizeof(row0), "  C-TRANSIT [%c] ", loc);
+    _pad(0, row0);
+    _pad(1, " >> Tap to Ride");
+}
+
 void display_show_status(const char* m){ _pad(0,"  C-TRANSIT    "); _pad(1,m); }
 void display_show_2line(const char* l1,const char* l2){ _pad(0,l1); _pad(1,l2); }
 

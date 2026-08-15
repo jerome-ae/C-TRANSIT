@@ -29,7 +29,7 @@ bool transaction_time_synced(){
     return s_base != 0;
 }
 
-TransactionResult transaction_record(const char* uid, const char* drv){
+TransactionResult transaction_record(const char* uid, const char* drv, int fare, char loc){
     if(!uid || !drv) return TX_ERROR;
 
     // Refuse to record a transaction until we have a real, RTC-seeded
@@ -42,18 +42,21 @@ TransactionResult transaction_record(const char* uid, const char* drv){
 
     unsigned long ts = transaction_get_ts();
     
-    // ── THE FIX: Fetch the fare from the LittleFS system config file
-    int current_fare = storage_read_fare();
-    
+    // Fare and location are supplied by the caller (main.cpp) based on the
+    // currently active location key (A, B, or C). This decouples the
+    // transaction layer from fare storage — each location has its own
+    // independently-updatable fare file (fare_a.dat, fare_b.dat, fare_c.dat).
+    //
     // PHASE 8 SECURITY NOTE: 
     // In Phase 8, 'uid' will be hashed before being written. 
     // We will also generate and append an HMAC signature to this transaction 
     // row to guarantee data integrity against manual LittleFS tampering.
-    LOG_INFO("TX", "Record uid=%s amt=%d ts=%lu drv=%s", uid, current_fare, ts, drv);
+    LOG_INFO("TX", "Record uid=%s amt=%d ts=%lu drv=%s loc=%c", uid, fare, ts, drv, loc);
     
-    StorageResult r = storage_append_tx(uid, current_fare, ts, drv);
+    StorageResult r = storage_append_tx(uid, fare, ts, drv, loc);
     if(r == STORAGE_OK)   return TX_RECORDED;
     if(r == STORAGE_FULL) return TX_LOG_FULL;
     
     return TX_ERROR;
 }
+

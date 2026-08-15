@@ -13,4 +13,5 @@ typedef enum {
 void              transaction_set_rtc(unsigned long unix_ts);
 unsigned long     transaction_get_ts();
 bool              transaction_time_synced();
-TransactionResult transaction_record(const char* uid, const char* drv_uid);
+TransactionResult transaction_record(const char* uid, const char* drv_uid, int fare, char loc);
+

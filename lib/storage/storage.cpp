@@ -152,9 +152,32 @@ bool storage_init() {
     }
     if (!LittleFS.exists(FILE_SESSION)) storage_write_session(0, "NONE");
     
-    // Auto-seed the default fare if it's missing or empty
+    // Auto-seed the default (global) fare if missing or empty
     if (storage_read_fare() == 0) {
         storage_write_fare(DEFAULT_FARE_AMOUNT);
+    }
+
+    // Seed per-location fares on first boot if files are missing or empty
+    const struct { const char* path; int def; } loc_fares[] = {
+        { FILE_FARE_A, DEFAULT_FARE_A },
+        { FILE_FARE_B, DEFAULT_FARE_B },
+        { FILE_FARE_C, DEFAULT_FARE_C },
+    };
+    for (auto& lf : loc_fares) {
+        if (!LittleFS.exists(lf.path)) {
+            File f = LittleFS.open(lf.path, "w");
+            if (f) { f.printf("%d\n", lf.def); f.close(); LOG_WARN("STORAGE", "Seeded %s → %d", lf.path, lf.def); }
+        } else {
+            // Re-seed if file exists but is empty
+            File f = LittleFS.open(lf.path, "r");
+            char tmp[16] = {0};
+            int len = f ? _read_line(f, tmp, sizeof(tmp)) : 0;
+            if (f) f.close();
+            if (len == 0 || atoi(tmp) == 0) {
+                File fw = LittleFS.open(lf.path, "w");
+                if (fw) { fw.printf("%d\n", lf.def); fw.close(); }
+            }
+        }
     }
     
     return true;
@@ -192,6 +215,60 @@ StorageResult storage_write_fare(int fare_amount) {
     return STORAGE_OK;
 }
 
+// =============================================================================
+//  PER-LOCATION FARE LOGIC
+//  Maps location char ('A','B','C') to its dedicated fare file.
+// =============================================================================
+static const char* _fare_path_for_loc(char loc) {
+    switch (loc) {
+        case 'A': return FILE_FARE_A;
+        case 'B': return FILE_FARE_B;
+        case 'C': return FILE_FARE_C;
+        default:  return FILE_FARE_A;  // safe fallback
+    }
+}
+
+static int _default_fare_for_loc(char loc) {
+    switch (loc) {
+        case 'A': return DEFAULT_FARE_A;
+        case 'B': return DEFAULT_FARE_B;
+        case 'C': return DEFAULT_FARE_C;
+        default:  return DEFAULT_FARE_A;
+    }
+}
+
+int storage_read_fare_for_loc(char loc) {
+    const char* path = _fare_path_for_loc(loc);
+    if (!_lock()) return _default_fare_for_loc(loc);
+    File f = LittleFS.open(path, "r");
+    if (!f) { _unlock(); return _default_fare_for_loc(loc); }
+
+    char line[LINE_BUF];
+    int len = _read_line(f, line, sizeof(line));
+    f.close();
+    _unlock();
+
+    if (len > 0) {
+        int v = atoi(line);
+        return (v != 0) ? v : _default_fare_for_loc(loc);
+    }
+    return _default_fare_for_loc(loc);
+}
+
+StorageResult storage_write_fare_for_loc(char loc, int fare_amount) {
+    const char* path = _fare_path_for_loc(loc);
+    if (!_lock()) return STORAGE_ERROR;
+    if (!_has_space(32)) { _unlock(); return STORAGE_FULL; }
+
+    File f = LittleFS.open(path, "w");
+    if (!f) { _unlock(); return STORAGE_ERROR; }
+
+    f.printf("%d\n", fare_amount);
+    f.close();
+    _unlock();
+    LOG_INFO("STORAGE", "Fare[%c] updated to: %d", loc, fare_amount);
+    return STORAGE_OK;
+}
 
 
 // =============================================================================
@@ -289,7 +366,7 @@ StorageResult storage_remove_uid(const char* path, const char* uid) {
 //  storage_append_tx
 // =============================================================================
 StorageResult storage_append_tx(const char* uid, int amt,
-                                unsigned long ts, const char* drv) {
+                                unsigned long ts, const char* drv, char loc) {
     if (!_lock()) return STORAGE_ERROR;
 
     int cnt = 0;
@@ -314,11 +391,12 @@ StorageResult storage_append_tx(const char* uid, int amt,
     File f = LittleFS.open(FILE_TX_LOG, "a");
     if (!f) { _unlock(); return STORAGE_ERROR; }
 
-    f.printf("%s,%d,%lu,%s\n", uid, amt, ts, drv);
+    // Format: uid,amount,timestamp,driver_uid,location
+    f.printf("%s,%d,%lu,%s,%c\n", uid, amt, ts, drv, loc);
     f.close();
     _unlock();
 
-    LOG_DEBUG("STORAGE", "tx appended line %d: %s,%d,%lu", cnt + 1, uid, amt, ts);
+    LOG_DEBUG("STORAGE", "tx appended line %d: %s,%d,%lu,loc=%c", cnt + 1, uid, amt, ts, loc);
     return STORAGE_OK;
 }
 

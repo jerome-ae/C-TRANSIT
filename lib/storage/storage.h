@@ -38,7 +38,8 @@ StorageResult storage_get_pin_for_uid(const char* path, const char* uid, char* o
 StorageResult storage_append_uid(const char* path, const char* uid);
 StorageResult storage_append_uid_with_pin(const char* path, const char* uid, const char* pin);
 StorageResult storage_remove_uid(const char* path, const char* uid);
-StorageResult storage_append_tx(const char* uid, int amt, unsigned long ts, const char* drv);
+StorageResult storage_append_tx(const char* uid, int amt, unsigned long ts, const char* drv, char loc);
+
 StorageResult storage_append_registration(const char* uid, uint32_t otp, const char* agent);
 
 // State & Config management (Overwritten files using "w")
@@ -49,6 +50,8 @@ StorageResult storage_write_sync_ts(unsigned long ts);
 
 int           storage_read_fare();                     // <-- NEW
 StorageResult storage_write_fare(int fare_amount);     // <-- NEW
+int           storage_read_fare_for_loc(char loc);     // loc = 'A', 'B', or 'C'
+StorageResult storage_write_fare_for_loc(char loc, int fare_amount);
 
 // Terminal ID persistence (OTA-safe — stored in LittleFS, not app partition)
 StorageResult storage_read_terminal_id(char* out, size_t sz);
