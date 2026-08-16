@@ -8,7 +8,7 @@ typedef enum {
     STAFF_AUTH_ADMIN_OK = 2,
     STAFF_AUTH_WRONG_PIN = 3, 
     STAFF_AUTH_NOT_STAFF = 4, 
-    STAFF_AUTH_ERROR = -1
+    STAFF_AUTH_ERROR = -1 
 } StaffAuthResult;
 
 typedef enum {

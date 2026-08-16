@@ -7,8 +7,8 @@
 // Terminal identity is derived from the ESP32 factory MAC address (silicon).
 // Last 3 bytes → 6-char hex string (e.g., "A1B2C3"). Immutable, survives OTA.
 // g_device_id[] is populated in main.cpp setup() before any task starts.
-#define DEVICE_ID_LEN       7          // "A1B2C3" + null         // includes null terminator
-#define FIRMWARE_VERSION     "v1.0.8L"
+#define DEVICE_ID_LEN       7          // "A1B2C3" + null
+#define FIRMWARE_VERSION     "v1.1.0L"
 
  
 // ── 2. OTA ────────────────────────────────────────────────────────────────────
@@ -36,6 +36,13 @@ typedef enum {
 // Any epoch below this is treated as "not a real time" (sanity guard against
 // NTP/broker glitches handing us garbage) — corresponds to ~2020-09-13.
 #define MIN_VALID_EPOCH     1600000000UL
+
+// ── Time Cache ───────────────────────────────────────────────────────────────
+#define FILE_TIME_CACHE         "/timetick.dat"
+#define FILE_TIME_CACHE_TMP     "/timetick.tmp"
+#define TIME_CACHE_INTERVAL_MS  300000UL    // 5 minutes between cache writes
+#define TIME_CACHE_MAX_AGE_SEC  604800UL    // 7 days — reject older caches
+#define MAX_REASONABLE_EPOCH    1814600000UL // ~June 2027 — reject beyond
 
 // ── 5. GSM / SIM800L (UART2) ──────────────────────────────────────────────────
 #define GSM_RX_PIN          16
@@ -102,20 +109,23 @@ static const char    KEYPAD_MAP[4][4]   = {
 #define FILE_TEMP       "/temp.log"
 #define FILE_SYSCFG     "/syscfg.dat"
 
+// ── Per-location fare file paths ───────────────────────────────────────────────
+#define FILE_FARE_A   "/fare_a.dat"
+#define FILE_FARE_B   "/fare_b.dat"
+#define FILE_FARE_C   "/fare_c.dat"
+
+// ── Active location persistence ────────────────────────────────────────────────
+#define FILE_LOCATION  "/location.dat"
+
 // ── 9. TIMING & BEHAVIOUR ─────────────────────────────────────────────────────
 #define SYNC_INTERVAL_MS          300000UL  // 5 minutes
 #define SYNC_TIMEOUT_SECONDS      10800UL   // 3-hour kill switch
 #define TX_LOG_MAX_LINES          2000
 #define MAX_OFFLINE_TAPS_PER_UID  2
-#define DEFAULT_FARE_AMOUNT       -200      // Global fallback fare (written by SYS:FARE,)
+#define DEFAULT_FARE_AMOUNT       -200      // Global fallback fare
 #define DEFAULT_FARE_A            -150      // Default fare for Location A
 #define DEFAULT_FARE_B            -200      // Default fare for Location B
 #define DEFAULT_FARE_C            -300      // Default fare for Location C
-
-// ── Per-location fare file paths ───────────────────────────────────────────
-#define FILE_FARE_A   "/fare_a.dat"  // Fare for Location A (route-specific)
-#define FILE_FARE_B   "/fare_b.dat"  // Fare for Location B (route-specific)
-#define FILE_FARE_C   "/fare_c.dat"  // Fare for Location C (route-specific)
 #define BEEP_SHORT_MS             150
 #define BEEP_LONG_MS              800
 #define LED_FEEDBACK_MS           2000

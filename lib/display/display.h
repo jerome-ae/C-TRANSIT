@@ -26,3 +26,4 @@ void display_set_backlight(bool on);
 // Call display_wake() on any RFID tap or keypad press to restore the screen.
 void display_sleep();   // clear screen + turn backlight off
 void display_wake();    // turn backlight on + restore idle screen
+ 

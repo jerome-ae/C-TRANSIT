@@ -37,10 +37,6 @@ static bool _has_space(size_t needed = 256) {
 // ── Read one line from an open file into a fixed buffer ───────────────────────
 static int _read_line(File& f, char* buf, size_t bufsz) {
     int len = 0;
-    // Use f.read() directly rather than gating on f.available() first.
-    // On LittleFS, f.available() can return 0 one byte early at EOF,
-    // causing the last line to be silently skipped when there is no
-    // trailing newline. Reading until read() returns -1 is EOF-safe.
     while (len < (int)bufsz - 1) {
         int c = f.read();
         if (c < 0)    break;          // true EOF
@@ -141,7 +137,7 @@ bool storage_init() {
     const char* needed[] = {
         FILE_WHITELIST, FILE_BLACKLIST, FILE_TX_LOG,
         FILE_SYNC,      FILE_DRIVERS,   FILE_ADMINS, 
-        FILE_NET_MODE,  FILE_SYSCFG
+        FILE_NET_MODE,  FILE_SYSCFG,    FILE_LOCATION
     };
     for (auto p : needed) {
         if (!LittleFS.exists(p)) {
@@ -168,7 +164,6 @@ bool storage_init() {
             File f = LittleFS.open(lf.path, "w");
             if (f) { f.printf("%d\n", lf.def); f.close(); LOG_WARN("STORAGE", "Seeded %s → %d", lf.path, lf.def); }
         } else {
-            // Re-seed if file exists but is empty
             File f = LittleFS.open(lf.path, "r");
             char tmp[16] = {0};
             int len = f ? _read_line(f, tmp, sizeof(tmp)) : 0;
@@ -178,6 +173,11 @@ bool storage_init() {
                 if (fw) { fw.printf("%d\n", lf.def); fw.close(); }
             }
         }
+    }
+
+    // Seed location file if missing
+    if (!LittleFS.exists(FILE_LOCATION)) {
+        storage_write_location('A');
     }
     
     return true;
@@ -217,14 +217,13 @@ StorageResult storage_write_fare(int fare_amount) {
 
 // =============================================================================
 //  PER-LOCATION FARE LOGIC
-//  Maps location char ('A','B','C') to its dedicated fare file.
 // =============================================================================
 static const char* _fare_path_for_loc(char loc) {
     switch (loc) {
         case 'A': return FILE_FARE_A;
         case 'B': return FILE_FARE_B;
         case 'C': return FILE_FARE_C;
-        default:  return FILE_FARE_A;  // safe fallback
+        default:  return FILE_FARE_A;
     }
 }
 
@@ -270,6 +269,40 @@ StorageResult storage_write_fare_for_loc(char loc, int fare_amount) {
     return STORAGE_OK;
 }
 
+// =============================================================================
+//  LOCATION PERSISTENCE
+// =============================================================================
+char storage_read_location() {
+    if (!_lock()) return 'A';
+    File f = LittleFS.open(FILE_LOCATION, "r");
+    if (!f) { _unlock(); return 'A'; }
+
+    char line[8];
+    int len = _read_line(f, line, sizeof(line));
+    f.close();
+    _unlock();
+
+    if (len > 0) {
+        char loc = line[0];
+        if (loc == 'A' || loc == 'B' || loc == 'C') return loc;
+    }
+    return 'A';
+}
+
+StorageResult storage_write_location(char loc) {
+    if (loc != 'A' && loc != 'B' && loc != 'C') return STORAGE_ERROR;
+    if (!_lock()) return STORAGE_ERROR;
+    if (!_has_space(16)) { _unlock(); return STORAGE_FULL; }
+
+    File f = LittleFS.open(FILE_LOCATION, "w");
+    if (!f) { _unlock(); return STORAGE_ERROR; }
+
+    f.printf("%c\n", loc);
+    f.close();
+    _unlock();
+    LOG_INFO("STORAGE", "Location saved: %c", loc);
+    return STORAGE_OK;
+}
 
 // =============================================================================
 //  storage_uid_in_file
@@ -391,7 +424,6 @@ StorageResult storage_append_tx(const char* uid, int amt,
     File f = LittleFS.open(FILE_TX_LOG, "a");
     if (!f) { _unlock(); return STORAGE_ERROR; }
 
-    // Format: uid,amount,timestamp,driver_uid,location
     f.printf("%s,%d,%lu,%s,%c\n", uid, amt, ts, drv, loc);
     f.close();
     _unlock();
@@ -535,7 +567,17 @@ unsigned long storage_read_sync_ts() {
     f.close();
     _unlock();
 
-    return (len > 0) ? (unsigned long)strtoul(line, nullptr, 10) : 0UL;
+    if (len == 0) return 0UL;
+
+    unsigned long ts = (unsigned long)strtoul(line, nullptr, 10);
+
+    // Guard against bogus zero timestamps written before clock sync
+    if (ts == 0) {
+        LOG_WARN("STORAGE", "sync.dat contains 0 — treating as no sync");
+        return 0UL;
+    }
+
+    return ts;
 }
 
 StorageResult storage_write_sync_ts(unsigned long ts) {
@@ -679,5 +721,77 @@ StorageResult storage_append_registration(const char* uid, uint32_t otp, const c
     _unlock();
     
     LOG_DEBUG("STORAGE", "Saved OTP payload to tx.log for %s", uid);
+    return STORAGE_OK;
+}
+
+// =============================================================================
+//  storage_write_time_cache — atomic write of cached time
+// =============================================================================
+StorageResult storage_write_time_cache(unsigned long epoch, unsigned long ms) {
+    if (!_lock()) return STORAGE_ERROR;
+    if (!_has_space(64)) { _unlock(); return STORAGE_FULL; }
+
+    File f = LittleFS.open(FILE_TIME_CACHE_TMP, "w");
+    if (!f) { _unlock(); return STORAGE_ERROR; }
+
+    f.printf("%lu\n%lu\n", epoch, ms);
+    f.close();
+
+    if (LittleFS.exists(FILE_TIME_CACHE)) {
+        LittleFS.remove(FILE_TIME_CACHE);
+    }
+
+    if (!LittleFS.rename(FILE_TIME_CACHE_TMP, FILE_TIME_CACHE)) {
+        _unlock();
+        return STORAGE_ERROR;
+    }
+
+    _unlock();
+    LOG_DEBUG("STORAGE", "Time cache written: epoch=%lu ms=%lu", epoch, ms);
+    return STORAGE_OK;
+}
+
+// =============================================================================
+//  storage_read_time_cache — read and validate cached time
+// =============================================================================
+StorageResult storage_read_time_cache(unsigned long* epoch, unsigned long* ms) {
+    if (!epoch || !ms) return STORAGE_ERROR;
+    *epoch = 0;
+    *ms = 0;
+
+    if (!_lock()) return STORAGE_ERROR;
+
+    if (!LittleFS.exists(FILE_TIME_CACHE)) {
+        _unlock();
+        LOG_DEBUG("STORAGE", "Time cache file not found");
+        return STORAGE_NOT_FOUND;
+    }
+
+    File f = LittleFS.open(FILE_TIME_CACHE, "r");
+    if (!f) { _unlock(); return STORAGE_ERROR; }
+
+    char line[32];
+    int len = _read_line(f, line, sizeof(line));
+    if (len == 0) { f.close(); _unlock(); return STORAGE_ERROR; }
+    *epoch = strtoul(line, nullptr, 10);
+
+    len = _read_line(f, line, sizeof(line));
+    if (len == 0) { f.close(); _unlock(); return STORAGE_ERROR; }
+    *ms = strtoul(line, nullptr, 10);
+
+    f.close();
+    _unlock();
+
+    if (*epoch < MIN_VALID_EPOCH) {
+        LOG_WARN("STORAGE", "Time cache rejected: epoch=%lu below minimum", *epoch);
+        return STORAGE_ERROR;
+    }
+
+    if (*epoch > MAX_REASONABLE_EPOCH) {
+        LOG_WARN("STORAGE", "Time cache rejected: epoch=%lu beyond maximum", *epoch);
+        return STORAGE_ERROR;
+    }
+
+    LOG_INFO("STORAGE", "Time cache read: epoch=%lu ms=%lu", *epoch, *ms);
     return STORAGE_OK;
 }

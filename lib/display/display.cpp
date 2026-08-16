@@ -36,9 +36,17 @@ bool display_init(){
 void display_show_idle(){ _pad(0,"  C-TRANSIT    "); _pad(1," >> Tap to Ride"); }
 
 void display_show_location_ready(char loc) {
-    char row0[17];
-    snprintf(row0, sizeof(row0), "  C-TRANSIT [%c] ", loc);
-    _pad(0, row0);
+    // Human-readable destination names — displayed during tap so the
+    // student can visually confirm where the ride is taking them.
+    const char* name;
+    switch (loc) {
+        case 'A': name = "    BUS PARK   ";   break;
+        case 'B': name = "  DEPARTMENT   ";   break;
+        case 'C': name = "HOSTEL/CLINIC  ";   break;
+        default:  name = "   UNKNOWN     ";   break;
+    }
+
+    _pad(0, name);
     _pad(1, " >> Tap to Ride");
 }
 
@@ -76,7 +84,7 @@ void display_set_backlight(bool on){ on?s_lcd.backlight():s_lcd.noBacklight(); }
 static bool s_display_sleeping = false;
 
 void display_sleep() {
-    if (s_display_sleeping) return;   // already asleep — no redundant I2C writes
+    if (s_display_sleeping) return;
     s_lcd.clear();
     s_lcd.noBacklight();
     s_display_sleeping = true;
@@ -84,9 +92,9 @@ void display_sleep() {
 }
 
 void display_wake() {
-    if (!s_display_sleeping) return;  // already awake — no redundant I2C writes
+    if (!s_display_sleeping) return;
     s_lcd.backlight();
     s_display_sleeping = false;
-    display_show_idle();              // restore the standard ">> Tap to Ride" screen
+    display_show_idle();
     LOG_INFO("DISPLAY", "LCD wake (activity detected)");
 }

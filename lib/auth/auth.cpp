@@ -47,15 +47,19 @@ StudentValidResult auth_validate_tap(const char* uid, unsigned long now, int* ou
     // Step 1 — 3-hour kill switch
     unsigned long last = storage_read_sync_ts();
     
+    // A zero timestamp means sync.dat was written before the clock was
+    // synced or the terminal has genuinely never synced. Treat as
+    // "grace period" rather than immediate lockdown so the terminal
+    // has a chance to sync and self-repair.
     if (last == 0) {
-        LOG_WARN("AUTH", "REJECT: No sync history found. Lockdown enforced.");
-        return STUDENT_SYNC_REQUIRED;
-    }
-    
-    unsigned long off = (now > last) ? (now - last) : 0;
-    if(off > SYNC_TIMEOUT_SECONDS){
-        LOG_WARN("AUTH", "3-hr lockdown! offline=%lus", off);
-        return STUDENT_SYNC_REQUIRED;
+        LOG_WARN("AUTH", "Sync ts is 0 — allowing tap to trigger sync cycle");
+        // Fall through — the tap will trigger sync_trigger_now()
+    } else {
+        unsigned long off = (now > last) ? (now - last) : 0;
+        if (off > SYNC_TIMEOUT_SECONDS) {
+            LOG_WARN("AUTH", "3-hr lockdown! offline=%lus", off);
+            return STUDENT_SYNC_REQUIRED;
+        }
     }
 
     // Step 2 — Whitelist (identity)

@@ -39,7 +39,6 @@ StorageResult storage_append_uid(const char* path, const char* uid);
 StorageResult storage_append_uid_with_pin(const char* path, const char* uid, const char* pin);
 StorageResult storage_remove_uid(const char* path, const char* uid);
 StorageResult storage_append_tx(const char* uid, int amt, unsigned long ts, const char* drv, char loc);
-
 StorageResult storage_append_registration(const char* uid, uint32_t otp, const char* agent);
 
 // State & Config management (Overwritten files using "w")
@@ -48,14 +47,18 @@ StorageResult storage_write_session(uint8_t active, const char* drv_uid);
 unsigned long storage_read_sync_ts();
 StorageResult storage_write_sync_ts(unsigned long ts);
 
-int           storage_read_fare();                     // <-- NEW
-StorageResult storage_write_fare(int fare_amount);     // <-- NEW
-int           storage_read_fare_for_loc(char loc);     // loc = 'A', 'B', or 'C'
+int           storage_read_fare();
+StorageResult storage_write_fare(int fare_amount);
+int           storage_read_fare_for_loc(char loc);
 StorageResult storage_write_fare_for_loc(char loc, int fare_amount);
 
-// Terminal ID persistence (OTA-safe — stored in LittleFS, not app partition)
-StorageResult storage_read_terminal_id(char* out, size_t sz);
-StorageResult storage_write_terminal_id(const char* id);
+// Location persistence (driver-selectable A/B/C)
+char          storage_read_location();
+StorageResult storage_write_location(char loc);
+
+// Time Cache (persistent time across reboots)
+StorageResult storage_write_time_cache(unsigned long epoch, unsigned long ms);
+StorageResult storage_read_time_cache(unsigned long* epoch, unsigned long* ms);
 
 // Network Sync specific functions
 int           storage_stream_tx_chunk(char* buf, size_t bufsz, size_t* bytes_read);

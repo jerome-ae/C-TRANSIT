@@ -6,6 +6,7 @@
 #include "../storage/storage.h"
 #include "../transaction/transaction.h"
 #include "../logger/logger.h"
+#include "../display/display.h"
 #include <LittleFS.h>
 #include <HTTPUpdate.h>
 #include <WiFi.h>
@@ -18,7 +19,7 @@
 volatile uint32_t g_last_upload_ms   = 0;
 volatile uint32_t g_last_download_ms = 0;
 
-// ── Runtime MQTT topic buffers (built from g_device_id in sync_init) ────────
+// ── Runtime MQTT topic buffers ───────────────────────────────────────────────
 extern char g_device_id[];
 static char s_topic_tx[48];
 static char s_topic_rx[48];
@@ -173,7 +174,7 @@ static bool _wifi_connect() {
     
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
-        esp_task_wdt_reset(); // Feed WDT — this loop can run up to 20s (WIFI_CONNECT_TIMEOUT_MS)
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(500));
     }
     
@@ -190,15 +191,9 @@ static bool _wifi_connect() {
 }
 
 // =============================================================================
-//  NTP TIME SYNC (Wi-Fi path)
-//  Seeds transaction.cpp's RTC (transaction_set_rtc) with a real epoch time
-//  so tx.log timestamps stop falling back to seconds-since-boot. No-op if
-//  we're already synced (e.g. a broker-pushed SYS:TIME already landed, or
-//  a previous Wi-Fi session already set it — RTC survives reconnects).
+//  NTP TIME SYNC — Always runs on WiFi connect. Updates sync.dat.
 // =============================================================================
 static bool _ntp_sync_time() {
-    if (transaction_time_synced()) return true;
-
     LOG_INFO("NTP", "Requesting time from %s / %s...", NTP_SERVER_1, NTP_SERVER_2);
     configTime(NTP_GMT_OFFSET_SEC, NTP_DST_OFFSET_SEC, NTP_SERVER_1, NTP_SERVER_2);
 
@@ -211,7 +206,7 @@ static bool _ntp_sync_time() {
     }
 
     if (!got_time) {
-        LOG_WARN("NTP", "Sync timed out — will retry on next Wi-Fi connect or wait for broker time");
+        LOG_WARN("NTP", "Sync timed out");
         return false;
     }
 
@@ -224,13 +219,15 @@ static bool _ntp_sync_time() {
 
     transaction_set_rtc((unsigned long)now);
     LOG_INFO("NTP", "Time synced via NTP: epoch=%lu", (unsigned long)now);
+
+    storage_write_sync_ts((unsigned long)now);
+    LOG_INFO("NTP", "sync.dat updated: %lu", (unsigned long)now);
+
     return true;
 }
 
 // =============================================================================
 //  MQTT CONNECT — WIFI
-//  [FIX] Uses PubSubClient native methods exclusively for WiFi path.
-//        No raw socket reads — all bytes go through PubSubClient's parser.
 // =============================================================================
 static bool _mqtt_connect_wifi() {
     if (s_mqtt.connected()) return true;
@@ -246,23 +243,16 @@ static bool _mqtt_connect_wifi() {
     
     LOG_INFO("WIFI", "TLS Handshake to %s:%d...", MQTT_HOST, MQTT_PORT);
     
-    // [FIX] cleanSession=false ensures broker queues downlinks while offline
     if (s_mqtt.connect(g_device_id, MQTT_BROKER_USER, MQTT_BROKER_PASS,
                        s_topic_status, MQTT_QOS, true, MQTT_LWT_OFFLINE, false)) {
         LOG_INFO("WIFI", "MQTT Connected");
         
-        // [FIX] Use PubSubClient::publish() — not raw socket writes
         bool online_ok = s_mqtt.publish(s_topic_status, MQTT_LWT_ONLINE, true);
         LOG_INFO("WIFI", "ONLINE publish %s", online_ok ? "OK" : "FAILED");
         
-        // Process the PUBACK for the ONLINE message
         s_mqtt.loop();
-        
-        // Subscribe to downlink topic
         _mqtt_subscribe_rx();
         
-        // [FIX] Aggressive drain: process all incoming packets for 500ms
-        // This catches any downlinks the broker queued while we were offline
         {
             uint32_t drain_start = millis();
             while (millis() - drain_start < 500) {
@@ -285,7 +275,11 @@ static bool _commit_acknowledged_delete(size_t bytes_to_delete) {
 
     StorageResult res = storage_atomic_delete_sent(bytes_to_delete);
     if (res == STORAGE_OK) {
-        storage_write_sync_ts(transaction_get_ts());
+        if (transaction_time_synced()) {
+            storage_write_sync_ts(transaction_get_ts());
+        } else {
+            LOG_WARN("WIFI", "Sync ts skipped — clock not yet synced");
+        }
         return true;
     }
 
@@ -295,8 +289,6 @@ static bool _commit_acknowledged_delete(size_t bytes_to_delete) {
 
 // =============================================================================
 //  FLUSH TX LOG — WIFI
-//  [FIX] Uses PubSubClient::publish() exclusively.
-//        Aggressive loop() afterward processes PUBACK + any incoming downlinks.
 // =============================================================================
 static void _flush_tx_wifi() {
     size_t bytes_read = 0;
@@ -306,14 +298,9 @@ static void _flush_tx_wifi() {
     
     LOG_INFO("WIFI", "Flushing %d lines (%zu bytes)", lines, strlen(s_payload));
     
-    // [FIX] PubSubClient native publish — QoS is handled internally.
-    // Returns true if the packet was written to the socket successfully.
     if (s_mqtt.publish(s_topic_tx, s_payload, strlen(s_payload))) {
         g_last_upload_ms = millis();
         
-        // [FIX] Run loop() aggressively for 1 second to:
-        //   1. Receive PUBACK for our publish
-        //   2. Receive any downlinks the broker sent in the same TCP window
         uint32_t ack_start = millis();
         while (millis() - ack_start < 1000) {
             s_mqtt.loop();
@@ -327,7 +314,7 @@ static void _flush_tx_wifi() {
 }
 
 // =============================================================================
-//  LOW-LEVEL AT COMMAND ENGINE (GSM — UNCHANGED)
+//  LOW-LEVEL AT COMMAND ENGINE (GSM)
 // =============================================================================
 static void _gsm_flush_rx() { while (Serial2.available()) Serial2.read(); }
 
@@ -361,13 +348,13 @@ static int _gsm_read(uint8_t* buf, size_t maxLen, uint32_t timeoutMs) {
 }
 
 // =============================================================================
-//  SIM800L LIFECYCLE (UNCHANGED)
+//  SIM800L LIFECYCLE
 // =============================================================================
 static bool _gsm_wake() {
     if (!_at_send("AT+CFUN=1", "OK", GSM_AT_TIMEOUT_MS)) return false;
     uint32_t start = millis();
     while ((millis() - start) < GSM_REG_TIMEOUT_MS) {
-        esp_task_wdt_reset(); // Feed WDT — this loop can run up to 30s (GSM_REG_TIMEOUT_MS)
+        esp_task_wdt_reset();
         _gsm_flush_rx();
         Serial2.println("AT+CREG?");
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -408,8 +395,6 @@ static bool _gsm_tcp_connect() {
 
 // =============================================================================
 //  RAW MQTT PACKET BUILDERS (GSM ONLY)
-//  [FIX] These are now used EXCLUSIVELY by the GSM path.
-//        WiFi path uses PubSubClient native methods — no raw socket access.
 // =============================================================================
 static void _mw_u16(uint8_t* b, int* p, uint16_t v) { b[(*p)++]=(uint8_t)(v>>8); b[(*p)++]=(uint8_t)(v&0xFF); }
 static void _mw_str(uint8_t* b, int* p, const char* s) { uint16_t l=(uint16_t)strlen(s); _mw_u16(b,p,l); memcpy(b+*p,s,l); *p+=l; }
@@ -439,7 +424,7 @@ static bool _gsm_cipsend(const uint8_t* data, size_t len) {
 
 static bool _mqtt_connect_packet() {
     static uint8_t pkt[256]; int pos=0; uint8_t var[64]; int vpos=0;
-    _mw_str(var,&vpos,"MQTT"); var[vpos++]=0x04; var[vpos++]=0xC2;  // Clean Session = false
+    _mw_str(var,&vpos,"MQTT"); var[vpos++]=0x04; var[vpos++]=0xC2;
     _mw_u16(var,&vpos,MQTT_KEEPALIVE_S);
     uint8_t pay[200]; int ppos=0;
     _mw_str(pay,&ppos,g_device_id);
@@ -490,15 +475,18 @@ static void _handle_ota(const char* url) {
     }
 
     LOG_INFO("OTA", "Starting OTA from: %s", url);
+    display_show_2line("  OTA UPDATE   ", " Downloading.. ");
 
     if (!_heap_ok()) {
-        LOG_ERROR("OTA", "OTA blocked: insufficient heap for secure transfer");
+        LOG_ERROR("OTA", "OTA blocked: insufficient heap");
+        display_show_2line("  OTA FAILED   ", "  Low Memory   ");
         return;
     }
 
     if (WiFi.status() != WL_CONNECTED) {
         if (!_wifi_connect()) {
             LOG_ERROR("OTA", "OTA blocked: Wi-Fi unavailable");
+            display_show_2line("  OTA FAILED   ", "  No WiFi      ");
             return;
         }
     }
@@ -510,15 +498,13 @@ static void _handle_ota(const char* url) {
     httpUpdate.rebootOnUpdate(false);
     httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
-    // Disable WDT for the duration of the OTA download — the HTTP download
-    // can legitimately take up to OTA_TIMEOUT_MS (120s), far beyond the
-    // 15s WDT window. We re-arm it via esp_task_wdt_reset() after the call.
     esp_task_wdt_delete(nullptr);
     t_httpUpdate_return ret = httpUpdate.update(ota_client, url);
-    esp_task_wdt_add(nullptr); // Re-register after OTA completes or fails
+    esp_task_wdt_add(nullptr);
 
     if (ret == HTTP_UPDATE_OK) {
         LOG_INFO("OTA", "Update SUCCESS. Finalizing flash...");
+        display_show_2line("  OTA COMPLETE ", "  Rebooting... ");
         ota_client.stop();
         vTaskDelay(pdMS_TO_TICKS(1000));
         ESP.restart();
@@ -529,10 +515,12 @@ static void _handle_ota(const char* url) {
 
     if (ret == HTTP_UPDATE_NO_UPDATES) {
         LOG_INFO("OTA", "No firmware update available");
+        display_show_2line("  OTA UPDATE   ", "  No New Firmware");
         return;
     }
 
     LOG_ERROR("OTA", "Update FAILED. Code=%d", httpUpdate.getLastError());
+    display_show_2line("  OTA FAILED   ", "  Retry Later  ");
 }
 
 // =============================================================================
@@ -541,32 +529,28 @@ static void _handle_ota(const char* url) {
 void sync_process_downlink(const char* pay, unsigned int len) {
     if (!pay || !len) return;
 
-    // SYS:FARE_A / SYS:FARE_B / SYS:FARE_C — per-location fare updates
-    // NOTE: These must be checked BEFORE SYS:FARE, (shorter prefix) to avoid
-    // a false match where "SYS:FARE_A,-200" matches strncmp(pay,"SYS:FARE,",9).
     if (strncmp(pay, "SYS:FARE_A,", 11) == 0) {
         int fare = atoi(pay + 11);
         storage_write_fare_for_loc('A', fare);
-        LOG_INFO("SYNC", "Fare[A] updated via downlink -> %d", fare);
+        LOG_INFO("SYNC", "Fare[A] updated -> %d", fare);
         return;
     }
     if (strncmp(pay, "SYS:FARE_B,", 11) == 0) {
         int fare = atoi(pay + 11);
         storage_write_fare_for_loc('B', fare);
-        LOG_INFO("SYNC", "Fare[B] updated via downlink -> %d", fare);
+        LOG_INFO("SYNC", "Fare[B] updated -> %d", fare);
         return;
     }
     if (strncmp(pay, "SYS:FARE_C,", 11) == 0) {
         int fare = atoi(pay + 11);
         storage_write_fare_for_loc('C', fare);
-        LOG_INFO("SYNC", "Fare[C] updated via downlink -> %d", fare);
+        LOG_INFO("SYNC", "Fare[C] updated -> %d", fare);
         return;
     }
 
-    // SYS:FARE, — global fare: writes all three location fares simultaneously
     if (strncmp(pay, "SYS:FARE,", 9) == 0) {
         int new_fare = atoi(pay + 9);
-        storage_write_fare(new_fare);            // keep syscfg.dat in sync
+        storage_write_fare(new_fare);
         storage_write_fare_for_loc('A', new_fare);
         storage_write_fare_for_loc('B', new_fare);
         storage_write_fare_for_loc('C', new_fare);
@@ -574,8 +558,20 @@ void sync_process_downlink(const char* pay, unsigned int len) {
         return;
     }
 
+    if (strncmp(pay, "SYS:LOC,", 8) == 0) {
+        char loc = pay[8];
+        if (loc == 'A' || loc == 'B' || loc == 'C') {
+            storage_write_location(loc);
+            LOG_INFO("SYNC", "Location updated -> %c", loc);
+        } else {
+            LOG_WARN("SYNC", "Invalid location: %c", loc);
+        }
+        return;
+    }
+
     if (strncmp(pay, "SYS:OTA,", 8) == 0) {
         char url[256]; strncpy(url, pay + 8, sizeof(url) - 1); url[sizeof(url) - 1] = '\0';
+        display_show_2line("  OTA UPDATE   ", "  Received...  ");
         _handle_ota(url); return;
     }
     
@@ -583,7 +579,8 @@ void sync_process_downlink(const char* pay, unsigned int len) {
         unsigned long epoch = strtoul(pay + 9, nullptr, 10);
         if (epoch >= MIN_VALID_EPOCH) {
             transaction_set_rtc(epoch);
-            LOG_INFO("SYNC", "Time synced via broker: epoch=%lu", epoch);
+            storage_write_sync_ts(epoch);
+            LOG_INFO("SYNC", "Time synced via broker: epoch=%lu, sync.dat updated", epoch);
         } else {
             LOG_WARN("SYNC", "Ignored implausible SYS:TIME payload: %s", pay);
         }
@@ -598,7 +595,11 @@ void sync_process_downlink(const char* pay, unsigned int len) {
     
     if (strncmp(pay, "SYS:SYNC_COMPLETE", 17) == 0) {
         LOG_INFO("SYNC", "Backend confirmed sync. Lifting lockdown.");
-        storage_write_sync_ts(transaction_get_ts()); 
+        if (transaction_time_synced()) {
+            storage_write_sync_ts(transaction_get_ts());
+        } else {
+            LOG_WARN("SYNC", "SYNC_COMPLETE received but clock not synced — sync.dat not updated");
+        }
         return;
     }
 
@@ -673,14 +674,9 @@ void sync_trigger_now() {
 
 // =============================================================================
 //  CORE 1 TASK — MAIN LOOP
-//  [FIX] Aggressive s_mqtt.loop() calls ensure downlinks are processed
-//        immediately, not delayed until the next sync interval.
 // =============================================================================
 void sync_task(void* params) {
     (void)params;
-    // Register this task with the Task Watchdog Timer.
-    // If sync_task hangs (e.g. TLS deadlock, GSM AT timeout) for more than
-    // WDT_TIMEOUT_SECONDS (15s), the watchdog will trigger a panic + reboot.
     esp_task_wdt_add(nullptr);
     sync_init();
     
@@ -693,8 +689,6 @@ void sync_task(void* params) {
     uint8_t gsm_fails = 0;
     
     while (true) {
-        // Feed the watchdog once per loop iteration (~100ms cadence).
-        // This must be called regularly to prevent the 15s WDT from firing.
         esp_task_wdt_reset();
 
         uint32_t notif = 0;
@@ -706,16 +700,11 @@ void sync_task(void* params) {
         if (mode == NET_MODE_WIFI) current_net = USE_WIFI;
         if (mode == NET_MODE_GSM)  current_net = USE_GSM;
 
-        // =========================================================
-        //  WIFI PATH
-        // =========================================================
         if (current_net == USE_WIFI) {
             if (triggered || time_to_sync || wifi_fails == 0) { 
                 if (_mqtt_connect_wifi()) {
                     wifi_fails = 0;
                     
-                    // [FIX] Always call loop() when connected — this is how
-                    // downlinks are received. Called every 100ms iteration.
                     s_mqtt.loop();
                     
                     if (triggered || time_to_sync) {
@@ -726,6 +715,14 @@ void sync_task(void* params) {
                                  ESP.getFreeHeap(), 
                                  uxTaskGetStackHighWaterMark(s_task_handle));
                         s_running = false;
+                    }
+
+                    // Periodic time cache refresh
+                    static uint32_t last_cache_write_ms = 0;
+                    if (transaction_time_synced() && 
+                        (millis() - last_cache_write_ms) >= TIME_CACHE_INTERVAL_MS) {
+                        last_cache_write_ms = millis();
+                        storage_write_time_cache(transaction_get_ts(), millis());
                     }
                 } else {
                     wifi_fails++;
@@ -740,9 +737,6 @@ void sync_task(void* params) {
             }
         } 
         
-        // =========================================================
-        //  GSM PATH (UNCHANGED)
-        // =========================================================
         else if (current_net == USE_GSM) {
             if (triggered || time_to_sync) {
                 LOG_WARN("SYNC", "Waking up SIM800L Module...");
@@ -753,7 +747,6 @@ void sync_task(void* params) {
                     bool online_ok = _mqtt_publish_gsm(s_topic_status, (const uint8_t*)MQTT_LWT_ONLINE, strlen(MQTT_LWT_ONLINE), 0, true);
                     LOG_INFO("GSM", "ONLINE publish %s", online_ok ? "ACKed" : "FAILED");
                     
-                    // ── GSM Time Sync via Cell Tower ─────────────────────────
                     if (!transaction_time_synced()) {
                         LOG_INFO("GSM", "Requesting network time from tower...");
                         
@@ -789,7 +782,8 @@ void sync_task(void* params) {
                                         
                                         if (epoch > 0 && (unsigned long)epoch >= MIN_VALID_EPOCH) {
                                             transaction_set_rtc((unsigned long)epoch);
-                                            LOG_INFO("GSM", "Time synced via tower: epoch=%lu (UTC)", (unsigned long)epoch);
+                                            storage_write_sync_ts((unsigned long)epoch);
+                                            LOG_INFO("GSM", "Time synced via tower: epoch=%lu (UTC), sync.dat updated", (unsigned long)epoch);
                                         } else {
                                             LOG_WARN("GSM", "Tower time invalid: epoch=%ld", (long)epoch);
                                         }
@@ -808,6 +802,14 @@ void sync_task(void* params) {
                     LOG_INFO("SYS", "GSM SYNC OK | Free Heap: %d B | Stack Free: %d words", 
                              ESP.getFreeHeap(), 
                              uxTaskGetStackHighWaterMark(s_task_handle));
+
+                    // Periodic time cache refresh
+                    static uint32_t last_cache_write_ms = 0;
+                    if (transaction_time_synced() && 
+                        (millis() - last_cache_write_ms) >= TIME_CACHE_INTERVAL_MS) {
+                        last_cache_write_ms = millis();
+                        storage_write_time_cache(transaction_get_ts(), millis());
+                    }
                 } else {
                     gsm_fails++;
                     LOG_ERROR("SYNC", "GSM fail %d/3", gsm_fails);

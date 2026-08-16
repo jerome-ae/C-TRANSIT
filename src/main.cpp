@@ -32,14 +32,15 @@
 // ── Terminal Identity (from factory MAC — OTA-safe, no file needed) ──────────
 // Declared here, extern'd wherever needed (storage.cpp, sync.cpp).
 // Populated in setup() from esp_efuse_mac_get_default() — read-only thereafter.
-char g_device_id[DEVICE_ID_LEN] = {0};;
+char g_device_id[DEVICE_ID_LEN] = {0};
 
 // ── Local Constants ───────────────────────────────────────────────────────────
-static const uint32_t LCD_ANIM_FLASH_MS = 500;
-static const uint32_t OTP_MIN           = 100000;
-static const uint32_t OTP_MAX           = 999999;
-static const uint32_t UI_REFRESH_MS     = 500;
-static const uint32_t RFID_WATCHDOG_MS  = 8000;
+static const uint32_t LCD_ANIM_FLASH_MS       = 500;
+static const uint32_t OTP_MIN                 = 100000;
+static const uint32_t OTP_MAX                 = 999999;
+static const uint32_t UI_REFRESH_MS           = 500;
+static const uint32_t RFID_WATCHDOG_MS        = 8000;
+static const uint32_t LOCKDOWN_RETRY_INTERVAL = 60000;
 
 // ── Forward declarations ──────────────────────────────────────────────────────
 static void rfid_ui_task(void* p);
@@ -64,7 +65,6 @@ static bool     s_display_is_asleep = false;
 
 // ── Active transport location ─────────────────────────────────────────────────
 // Driver selects A, B, or C with the corresponding keypad key.
-// Resets to 'A' on every new login so sessions always start at Location A.
 // s_active_fare is loaded from storage when location changes so subsequent
 // taps use the correct per-route fare without hitting the filesystem each time.
 static char s_active_location = 'A';
@@ -96,6 +96,18 @@ void setup() {
                  mac[3], mac[4], mac[5]);
     }
     LOG_INFO("MAIN", "=== BOOT === Device: %s  FW: %s", g_device_id, FIRMWARE_VERSION);
+
+    // Restore time from cache so taps work immediately even without network
+    if (transaction_init()) {
+        LOG_INFO("MAIN", "Time restored from cache — taps enabled immediately");
+    } else {
+        LOG_WARN("MAIN", "No time cache — taps blocked until network time syncs");
+    }
+
+    // Load persisted location
+    s_active_location = storage_read_location();
+    s_active_fare     = storage_read_fare_for_loc(s_active_location);
+    LOG_INFO("MAIN", "Location restored: %c (fare=%d)", s_active_location, s_active_fare);
     
     // State machine reads sess.dat — determines OFFLINE_LOCKED or READY
     sm_init();
@@ -221,8 +233,17 @@ static void rfid_ui_task(void* p) {
             }
 
             // Lockdown release check
-            if (sm_get_state() == STATE_HARD_LOCKDOWN && !sync_is_running())
+            if (sm_get_state() == STATE_HARD_LOCKDOWN && !sync_is_running()) {
                 check_lockdown_release();
+                // Retry sync every 60 seconds while in lockdown so the
+                // backend gets a SYNC_REQUEST payload and can respond.
+                static uint32_t last_lockdown_sync_ms = 0;
+                if (millis() - last_lockdown_sync_ms > LOCKDOWN_RETRY_INTERVAL) {
+                    last_lockdown_sync_ms = millis();
+                    LOG_INFO("MAIN", "Lockdown retry — requesting sync");
+                    sync_trigger_now();
+                }
+            }
 
             // Cold sync completion check
             if (sm_get_state() == STATE_COLD_SYNC && !sync_is_running()) {
@@ -337,6 +358,7 @@ static void handle_mode_keypad(char key) {
             // Select Location A — load its fare from storage and update display
             s_active_location = 'A';
             s_active_fare     = storage_read_fare_for_loc('A');
+            storage_write_location('A');
             display_show_location_ready('A');
             LOG_INFO("MAIN", "Location A selected (fare=%d)", s_active_fare);
             break;
@@ -345,6 +367,7 @@ static void handle_mode_keypad(char key) {
             // Select Location B — load its fare from storage and update display
             s_active_location = 'B';
             s_active_fare     = storage_read_fare_for_loc('B');
+            storage_write_location('B');
             display_show_location_ready('B');
             LOG_INFO("MAIN", "Location B selected (fare=%d)", s_active_fare);
             break;
@@ -353,6 +376,7 @@ static void handle_mode_keypad(char key) {
             // Select Location C — load its fare from storage and update display
             s_active_location = 'C';
             s_active_fare     = storage_read_fare_for_loc('C');
+            storage_write_location('C');
             display_show_location_ready('C');
             LOG_INFO("MAIN", "Location C selected (fare=%d)", s_active_fare);
             break;
@@ -375,6 +399,7 @@ static void handle_mode_keypad(char key) {
             // Reset active location so the next session always starts at A
             s_active_location = 'A';
             s_active_fare     = DEFAULT_FARE_A;
+            storage_write_location('A');
             break;
 
         default:
@@ -420,11 +445,11 @@ static void handle_offline_locked_tap(const char* uid) {
         case STAFF_AUTH_DRIVER_OK:
             sm_set_driver_uid(uid);
             sm_transition(STATE_READY);
-            // Reset location to A and reload fare for the new session
-            s_active_location = 'A';
-            s_active_fare     = storage_read_fare_for_loc('A');
-            display_show_location_ready('A');  // override idle with location display
-            LOG_INFO("MAIN", "Driver %s logged in → Location A (fare=%d)", uid, s_active_fare);
+            // Restore persisted location for the new session
+            s_active_location = storage_read_location();
+            s_active_fare     = storage_read_fare_for_loc(s_active_location);
+            display_show_location_ready(s_active_location);
+            LOG_INFO("MAIN", "Driver %s logged in → Location %c (fare=%d)", uid, s_active_location, s_active_fare);
             break;
         case STAFF_AUTH_ADMIN_OK:
             sm_set_driver_uid(uid);
@@ -506,6 +531,13 @@ static void handle_ready_tap(const char* uid) {
             ui_feedback_rejected();
             ui_delay(LCD_RESULT_MS);
             sm_transition(STATE_HARD_LOCKDOWN);
+            // Send SYNC_REQUEST payload so the backend knows this terminal
+            // is in lockdown and needs immediate attention.
+            if (transaction_time_synced()) {
+                storage_append_tx("SYNC_REQUEST", 0, transaction_get_ts(),
+                                  sm_get_driver_uid(), s_active_location);
+            }
+            sync_trigger_now();
             break;
         case STUDENT_INVALID_CARD:
             sm_transition(STATE_DENIED);
@@ -539,6 +571,7 @@ static void handle_ready_tap(const char* uid) {
             break; 
     }
 }
+
 // =============================================================================
 //  handle_register_tap
 // =============================================================================
